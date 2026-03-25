@@ -761,3 +761,952 @@ flowchart TD
   5. 更新 `ClusterOperator.status` → 报告升级进度。  
 
 这样你就能直观地看到：**`release-metadata` 决定能不能升级，`image-references` 决定升级用哪些镜像，CVO 将两者结合来完成整个升级过程。**  
+
+
+# OpenShift Cluster Version Operator (CVO) 详细设计
+
+## 1. 概述
+
+### 1.1 设计目标
+
+Cluster Version Operator (CVO) 是 OpenShift 4.x 的核心组件，负责：
+- 管理 OpenShift 集群的完整生命周期
+- 协调所有 ClusterOperator 的安装和升级
+- 提供声明式的版本管理能力
+- 实现安全、可控的集群升级流程
+
+### 1.2 核心特性
+
+| 特性 | 描述 |
+|------|------|
+| **声明式版本管理** | 通过 ClusterVersion CRD 声明期望版本 |
+| **Payload 机制** | 通过 Release Image 统一分发所有组件清单 |
+| **Runlevel 分级** | 按优先级分阶段应用 Manifest |
+| **状态聚合** | 聚合所有 ClusterOperator 的健康状态 |
+| **安全升级** | 支持渐进式升级、暂停、回滚 |
+
+## 2. 架构设计
+
+### 2.1 整体架构
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                              OpenShift Control Plane                            │
+├─────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │                    Cluster Version Operator (CVO)                        │   │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐    │   │
+│  │  │   Reconcile │  │   Payload   │  │   Manifest  │  │   Status    │    │   │
+│  │  │   Loop      │  │   Manager   │  │   Applier   │  │   Monitor   │    │   │
+│  │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘    │   │
+│  │                                                                         │   │
+│  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐    │   │
+│  │  │   Update    │  │   Operator  │  │   Condition │  │   Override  │    │   │
+│  │  │   Graph     │  │   Status    │  │   Manager   │  │   Handler   │    │   │
+│  │  │   Client    │  │   Tracker   │  │             │  │             │    │   │
+│  │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘    │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│         │                    │                    │                    │        │
+│         ▼                    ▼                    ▼                    ▼        │
+│  ┌─────────────┐    ┌─────────────────┐    ┌─────────────────┐    ┌────────┐  │
+│  │ClusterVersion│    │   Release       │    │ ClusterOperator │    │ Config │  │
+│  │     CRD      │    │   Image         │    │      CRDs       │    │  Maps  │  │
+│  │ (config.open-│    │   (Payload)     │    │ (config.open-   │    │        │  │
+│  │  shift.io)   │    │                 │    │  shift.io)      │    │        │  │
+│  └─────────────┘    └─────────────────┘    └─────────────────┘    └────────┘  │
+│                                                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────────┐   │
+│  │                         ClusterOperators                                 │   │
+│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐      │   │
+│  │  │   etcd   │ │   dns    │ │ ingress  │ │ console  │ │monitoring│      │   │
+│  │  │ Operator │ │ Operator │ │ Operator │ │ Operator │ │ Operator │      │   │
+│  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘      │   │
+│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐      │   │
+│  │  │  kube-   │ │  api-    │ │ machine- │ │ network  │ │  cvo     │      │   │
+│  │  │apiserver │ │ server   │ │  config  │ │ operator │ │(self)    │      │   │
+│  │  └──────────┘ └──────────┘ └──────────┘ └──────────┘ └──────────┘      │   │
+│  └─────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                 │
+└─────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 2.2 组件交互图
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           CVO 组件交互流程                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  用户/管理员                                                                │
+│       │                                                                     │
+│       │ oc adm upgrade --to=4.14.1                                          │
+│       ▼                                                                     │
+│  ┌─────────────┐                                                           │
+│  │ClusterVersion│ ◄───── CVO Watch                                         │
+│  │     CR       │                                                          │
+│  └─────────────┘                                                           │
+│       │                                                                     │
+│       │ spec.desiredUpdate.version = "4.14.1"                              │
+│       ▼                                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                         CVO Reconcile Loop                           │   │
+│  │                                                                     │   │
+│  │  1. Fetch Release Image                                             │   │
+│  │     ┌─────────────┐                                                 │   │
+│  │     │   Payload   │ ◄── quay.io/openshift-release-dev/ocp-release  │   │
+│  │     │   Manager   │                                                 │   │
+│  │     └─────────────┘                                                 │   │
+│  │           │                                                         │   │
+│  │           ▼                                                         │   │
+│  │  2. Extract & Parse Manifests                                       │   │
+│  │     ┌─────────────┐                                                 │   │
+│  │     │  Manifest   │ ──► Sort by Runlevel (0000_10, 0000_50...)     │   │
+│  │     │  Processor  │                                                 │   │
+│  │     └─────────────┘                                                 │   │
+│  │           │                                                         │   │
+│  │           ▼                                                         │   │
+│  │  3. Apply Manifests (Runlevel by Runlevel)                          │   │
+│  │     ┌─────────────┐                                                 │   │
+│  │     │  Manifest   │ ──► kubectl apply --server-side                 │   │
+│  │     │  Applier    │                                                 │   │
+│  │     └─────────────┘                                                 │   │
+│  │           │                                                         │   │
+│  │           ▼                                                         │   │
+│  │  4. Monitor ClusterOperator Status                                  │   │
+│  │     ┌─────────────┐                                                 │   │
+│  │     │   Status    │ ──► Wait for Available=True, Progressing=False  │   │
+│  │     │   Monitor   │                                                 │   │
+│  │     └─────────────┘                                                 │   │
+│  │           │                                                         │   │
+│  │           ▼                                                         │   │
+│  │  5. Update ClusterVersion Status                                    │   │
+│  │     ┌─────────────┐                                                 │   │
+│  │     │   Status    │ ──► Update history, conditions                  │   │
+│  │     │   Updater   │                                                 │   │
+│  │     └─────────────┘                                                 │   │
+│  │                                                                     │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+## 3. 核心数据结构
+
+### 3.1 ClusterVersion CRD
+
+```go
+type ClusterVersion struct {
+    metav1.TypeMeta   `json:",inline"`
+    metav1.ObjectMeta `json:"metadata,omitempty"`
+
+    Spec   ClusterVersionSpec   `json:"spec,omitempty"`
+    Status ClusterVersionStatus `json:"status,omitempty"`
+}
+
+type ClusterVersionSpec struct {
+    ClusterID string `json:"clusterID"`
+    
+    DesiredUpdate *Update `json:"desiredUpdate,omitempty"`
+    
+    Channel string `json:"channel,omitempty"`
+    
+    Upstream string `json:"upstream,omitempty"`
+    
+    Overrides []ComponentOverride `json:"overrides,omitempty"`
+}
+
+type Update struct {
+    Version string `json:"version"`
+    Image   string `json:"image"`
+    Force   bool   `json:"force,omitempty"`
+}
+
+type ComponentOverride struct {
+    Kind      string `json:"kind"`
+    Name      string `json:"name"`
+    Namespace string `json:"namespace,omitempty"`
+    Unmanaged bool   `json:"unmanaged"`
+    Force     bool   `json:"force,omitempty"`
+}
+
+type ClusterVersionStatus struct {
+    Desired Version `json:"desired"`
+    
+    History []UpdateHistory `json:"history"`
+    
+    AvailableUpdates []Update `json:"availableUpdates,omitempty"`
+    
+    Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+type UpdateHistory struct {
+    Version    string          `json:"version"`
+    Image      string          `json:"image"`
+    State      UpdateState     `json:"state"`
+    Started    metav1.Time     `json:"startedTime"`
+    Completion *metav1.Time    `json:"completionTime,omitempty"`
+}
+
+type UpdateState string
+
+const (
+    UpdateStateCompleted UpdateState = "Completed"
+    UpdateStatePartial   UpdateState = "Partial"
+    UpdateStatePending   UpdateState = "Pending"
+)
+```
+
+### 3.2 ClusterOperator CRD
+
+```go
+type ClusterOperator struct {
+    metav1.TypeMeta   `json:",inline"`
+    metav1.ObjectMeta `json:"metadata,omitempty"`
+
+    Spec   ClusterOperatorSpec   `json:"spec,omitempty"`
+    Status ClusterOperatorStatus `json:"status,omitempty"`
+}
+
+type ClusterOperatorSpec struct {
+    ManagementState ManagementState `json:"managementState,omitempty"`
+}
+
+type ManagementState string
+
+const (
+    Managed    ManagementState = "Managed"
+    Unmanaged  ManagementState = "Unmanaged"
+    Removed    ManagementState = "Removed"
+)
+
+type ClusterOperatorStatus struct {
+    Versions []OperandVersion `json:"versions,omitempty"`
+    
+    Conditions []ClusterOperatorStatusCondition `json:"conditions,omitempty"`
+    
+    RelatedObjects []ObjectReference `json:"relatedObjects,omitempty"`
+    
+    Extension runtime.RawExtension `json:"extension,omitempty"`
+}
+
+type OperandVersion struct {
+    Name    string `json:"name"`
+    Version string `json:"version"`
+}
+
+type ClusterOperatorStatusCondition struct {
+    Type               ConditionStatus   `json:"type"`
+    Status             corev1.ConditionStatus `json:"status"`
+    Reason             string `json:"reason,omitempty"`
+    Message            string `json:"message,omitempty"`
+    LastTransitionTime metav1.Time `json:"lastTransitionTime,omitempty"`
+}
+
+type ConditionStatus string
+
+const (
+    ConditionAvailable   ConditionStatus = "Available"
+    ConditionProgressing ConditionStatus = "Progressing"
+    ConditionDegraded    ConditionStatus = "Degraded"
+    ConditionUpgradeable ConditionStatus = "Upgradeable"
+)
+```
+
+### 3.3 Release Image (Payload) 结构
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Release Image 结构                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  quay.io/openshift-release-dev/ocp-release:4.14.0                           │
+│                                                                             │
+│  ├── release-manifests/                                                     │
+│  │   ├── 0000_00_cluster-version-operator_01_cvo-crd.yaml                  │
+│  │   ├── 0000_00_cluster-version-operator_02_cvo-deployment.yaml           │
+│  │   ├── image-references                                                   │
+│  │   └── release-metadata                                                   │
+│  │                                                                         │
+│  ├── manifests/                                                             │
+│  │   ├── 0000_10_etcd-operator_00_namespace.yaml                           │
+│  │   ├── 0000_10_etcd-operator_01_crd.yaml                                 │
+│  │   ├── 0000_10_etcd-operator_02_rbac.yaml                                │
+│  │   ├── 0000_10_etcd-operator_03_deployment.yaml                          │
+│  │   ├── 0000_10_dns-operator_00_namespace.yaml                            │
+│  │   ├── 0000_10_dns-operator_01_crd.yaml                                  │
+│  │   ├── 0000_50_cluster-openshift-controller_...                          │
+│  │   ├── 0000_90_cluster-openshift-ingress_...                             │
+│  │   └── ... (所有 ClusterOperator 的清单)                                  │
+│  │                                                                         │
+│  └── sha256:xxxxx (各组件镜像层)                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 3.4 Manifest 文件命名规范
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Manifest 文件命名规范                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  格式: 0000_XX_operator-name_YY_resource-type.yaml                          │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  0000_10_etcd-operator_01_crd.yaml                                  │   │
+│  │  │     │              │   └── 资源序号 + 类型                         │   │
+│  │  │     │              └── Operator 名称                              │   │
+│  │  │     └── Runlevel (优先级，数字越小越先执行)                        │   │
+│  │  └── 固定前缀                                                        │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  Runlevel 分级:                                                             │
+│  ├── 0000_00_... : CRD 定义 (最先执行)                                      │
+│  ├── 0000_01_... : RBAC 定义                                               │
+│  ├── 0000_10_... : 核心组件 (etcd, dns, kube-apiserver)                    │
+│  ├── 0000_50_... : 中等优先级组件                                          │
+│  └── 0000_90_... : 低优先级组件 (最后执行)                                  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+## 4. 核心模块设计
+
+### 4.1 Reconcile Loop
+
+```go
+func (c *ClusterVersionOperator) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+    cv := &configv1.ClusterVersion{}
+    if err := c.client.Get(ctx, req.NamespacedName, cv); err != nil {
+        return ctrl.Result{}, client.IgnoreNotFound(err)
+    }
+
+    if cv.Spec.DesiredUpdate == nil {
+        return ctrl.Result{}, nil
+    }
+
+    desiredVersion := cv.Spec.DesiredUpdate.Version
+    currentVersion := cv.Status.Desired.Version
+
+    if desiredVersion == currentVersion {
+        return c.monitorClusterOperators(ctx, cv)
+    }
+
+    return c.performUpdate(ctx, cv)
+}
+
+func (c *ClusterVersionOperator) performUpdate(ctx context.Context, cv *configv1.ClusterVersion) (ctrl.Result, error) {
+    payload, err := c.payloadManager.Fetch(ctx, cv.Spec.DesiredUpdate.Image)
+    if err != nil {
+        return ctrl.Result{}, fmt.Errorf("failed to fetch payload: %w", err)
+    }
+
+    manifests, err := c.manifestProcessor.ExtractAndSort(payload)
+    if err != nil {
+        return ctrl.Result{}, fmt.Errorf("failed to extract manifests: %w", err)
+    }
+
+    for runlevel, runlevelManifests := range manifests.ByRunlevel() {
+        if err := c.applyRunlevel(ctx, runlevel, runlevelManifests); err != nil {
+            return ctrl.Result{}, fmt.Errorf("failed to apply runlevel %d: %w", runlevel, err)
+        }
+
+        if err := c.waitForRunlevelCompletion(ctx, runlevel); err != nil {
+            return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+        }
+    }
+
+    c.updateClusterVersionStatus(ctx, cv, desiredVersion)
+    return ctrl.Result{}, nil
+}
+```
+
+### 4.2 Payload Manager
+
+```go
+type PayloadManager interface {
+    Fetch(ctx context.Context, image string) (*Payload, error)
+    Extract(payload *Payload) ([]byte, error)
+    Verify(payload *Payload) error
+}
+
+type payloadManager struct {
+    imageRegistry imageRegistry
+    cache         payloadCache
+}
+
+func (p *payloadManager) Fetch(ctx context.Context, image string) (*Payload, error) {
+    if cached, ok := p.cache.Get(image); ok {
+        return cached, nil
+    }
+
+    ref, err := parseImageReference(image)
+    if err != nil {
+        return nil, err
+    }
+
+    manifest, err := p.imageRegistry.PullManifest(ctx, ref)
+    if err != nil {
+        return nil, err
+    }
+
+    payload := &Payload{
+        Image:    image,
+        Manifest: manifest,
+        Layers:   make(map[string][]byte),
+    }
+
+    for _, layer := range manifest.Layers {
+        data, err := p.imageRegistry.PullLayer(ctx, ref, layer)
+        if err != nil {
+            return nil, err
+        }
+        payload.Layers[layer.Digest] = data
+    }
+
+    p.cache.Set(image, payload)
+    return payload, nil
+}
+```
+
+### 4.3 Manifest Processor
+
+```go
+type ManifestProcessor interface {
+    ExtractAndSort(payload *Payload) (*SortedManifests, error)
+    Apply(ctx context.Context, manifest *unstructured.Unstructured) error
+}
+
+type manifestProcessor struct {
+    client    client.Client
+    applier   *apply.Applier
+    overrides []ComponentOverride
+}
+
+type SortedManifests struct {
+    manifests map[int][]*unstructured.Unstructured
+}
+
+func (m *manifestProcessor) ExtractAndSort(payload *Payload) (*SortedManifests, error) {
+    sorted := &SortedManifests{
+        manifests: make(map[int][]*unstructured.Unstructured),
+    }
+
+    for _, layer := range payload.Layers {
+        tarReader := tar.NewReader(bytes.NewReader(layer))
+        
+        for {
+            header, err := tarReader.Next()
+            if err == io.EOF {
+                break
+            }
+            if err != nil {
+                return nil, err
+            }
+
+            if !strings.HasPrefix(header.Name, "manifests/") {
+                continue
+            }
+
+            data, err := io.ReadAll(tarReader)
+            if err != nil {
+                return nil, err
+            }
+
+            obj := &unstructured.Unstructured{}
+            if err := yaml.Unmarshal(data, obj); err != nil {
+                continue
+            }
+
+            runlevel := m.extractRunlevel(header.Name)
+            sorted.manifests[runlevel] = append(sorted.manifests[runlevel], obj)
+        }
+    }
+
+    return sorted, nil
+}
+
+func (m *manifestProcessor) extractRunlevel(filename string) int {
+    parts := strings.Split(filename, "_")
+    if len(parts) < 2 {
+        return 50
+    }
+    
+    runlevel, err := strconv.Atoi(parts[1])
+    if err != nil {
+        return 50
+    }
+    
+    return runlevel
+}
+
+func (m *manifestProcessor) Apply(ctx context.Context, obj *unstructured.Unstructured) error {
+    if m.isOverridden(obj) {
+        return nil
+    }
+
+    return m.applier.Apply(ctx, obj, apply.Options{
+        ServerSideApply: true,
+        ForceOwnership:  true,
+    })
+}
+```
+
+### 4.4 Status Monitor
+
+```go
+type StatusMonitor interface {
+    WatchClusterOperator(ctx context.Context, name string) error
+    GetClusterOperatorStatus(ctx context.Context, name string) (*ClusterOperatorStatus, error)
+    AggregateStatus(ctx context.Context) (*AggregatedStatus, error)
+}
+
+type statusMonitor struct {
+    client client.Client
+    cache  statusCache
+}
+
+type AggregatedStatus struct {
+    Available   bool
+    Progressing bool
+    Degraded    bool
+    Details     []OperatorStatusDetail
+}
+
+func (s *statusMonitor) AggregateStatus(ctx context.Context) (*AggregatedStatus, error) {
+    operators := &configv1.ClusterOperatorList{}
+    if err := s.client.List(ctx, operators); err != nil {
+        return nil, err
+    }
+
+    aggregated := &AggregatedStatus{
+        Available:   true,
+        Progressing: false,
+        Degraded:    false,
+        Details:     make([]OperatorStatusDetail, 0),
+    }
+
+    for _, co := range operators.Items {
+        detail := OperatorStatusDetail{
+            Name: co.Name,
+        }
+
+        for _, cond := range co.Status.Conditions {
+            switch cond.Type {
+            case configv1.OperatorAvailable:
+                if cond.Status != corev1.ConditionTrue {
+                    aggregated.Available = false
+                }
+                detail.Available = cond.Status == corev1.ConditionTrue
+                
+            case configv1.OperatorProgressing:
+                if cond.Status == corev1.ConditionTrue {
+                    aggregated.Progressing = true
+                }
+                detail.Progressing = cond.Status == corev1.ConditionTrue
+                
+            case configv1.OperatorDegraded:
+                if cond.Status == corev1.ConditionTrue {
+                    aggregated.Degraded = true
+                }
+                detail.Degraded = cond.Status == corev1.ConditionTrue
+            }
+        }
+
+        aggregated.Details = append(aggregated.Details, detail)
+    }
+
+    return aggregated, nil
+}
+```
+
+### 4.5 Update Graph Client
+
+```go
+type UpdateGraphClient interface {
+    FetchAvailableUpdates(ctx context.Context, currentVersion string, channel string) ([]Update, error)
+    ValidateUpdatePath(ctx context.Context, from, to string) error
+}
+
+type updateGraphClient struct {
+    upstream string
+    client   *http.Client
+}
+
+func (u *updateGraphClient) FetchAvailableUpdates(ctx context.Context, currentVersion, channel string) ([]Update, error) {
+    url := fmt.Sprintf("%s/api/upgrades_info/v1/graph?channel=%s&version=%s", 
+        u.upstream, channel, currentVersion)
+
+    req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+    if err != nil {
+        return nil, err
+    }
+
+    resp, err := u.client.Do(req)
+    if err != nil {
+        return nil, err
+    }
+    defer resp.Body.Close()
+
+    var graph UpdateGraph
+    if err := json.NewDecoder(resp.Body).Decode(&graph); err != nil {
+        return nil, err
+    }
+
+    return u.findAvailableUpdates(currentVersion, &graph), nil
+}
+
+type UpdateGraph struct {
+    Nodes []Node `json:"nodes"`
+    Edges []Edge `json:"edges"`
+}
+
+type Node struct {
+    Version string `json:"version"`
+    Image   string `json:"payload"`
+}
+
+type Edge struct {
+    From int `json:"from"`
+    To   int `json:"to"`
+}
+```
+
+## 5. 升级流程详细设计
+
+### 5.1 升级状态机
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           升级状态机                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌──────────┐    用户触发升级    ┌──────────┐                              │
+│  │  Idle    │ ──────────────────►│Checking  │                              │
+│  │ (空闲)   │                    │Updates   │                              │
+│  └──────────┘                    └──────────┘                              │
+│       ▲                                │                                    │
+│       │                                │ 检查通过                            │
+│       │                                ▼                                    │
+│       │                         ┌──────────┐                               │
+│       │                         │ Fetching │                               │
+│       │                         │ Payload  │                               │
+│       │                         └──────────┘                               │
+│       │                                │                                    │
+│       │                                │ Payload 下载完成                     │
+│       │                                ▼                                    │
+│       │                         ┌──────────┐                               │
+│       │                         │ Applying │                               │
+│       │                         │Manifests │                               │
+│       │                         └──────────┘                               │
+│       │                                │                                    │
+│       │                                │ Manifests 应用完成                   │
+│       │                                ▼                                    │
+│       │                         ┌──────────┐                               │
+│       │                         │ Waiting  │                               │
+│       │                         │Operators │                               │
+│       │                         └──────────┘                               │
+│       │                                │                                    │
+│       │                                │ 所有 Operator 就绪                   │
+│       │                                ▼                                    │
+│       │                         ┌──────────┐                               │
+│       └─────────────────────────│Completed │                               │
+│                                   └──────────┘                               │
+│                                                                             │
+│  错误状态:                                                                   │
+│  ┌──────────┐                                                              │
+│  │ Degraded │ ◄─── 任何阶段失败                                            │
+│  └──────────┘                                                              │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 5.2 Runlevel 执行流程
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      Runlevel 执行流程                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Runlevel 00 (CRD 定义)                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  0000_00_cluster-version-operator_01_cvo-crd.yaml                   │   │
+│  │  0000_00_cluster-operator_01_clusteroperator-crd.yaml               │   │
+│  │  ...                                                                 │   │
+│  │  执行: kubectl apply --server-side                                   │   │
+│  │  等待: CRD Established                                               │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                              │
+│                              ▼                                              │
+│  Runlevel 10 (核心组件)                                                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  0000_10_etcd-operator_00_namespace.yaml                            │   │
+│  │  0000_10_etcd-operator_01_crd.yaml                                  │   │
+│  │  0000_10_etcd-operator_02_deployment.yaml                           │   │
+│  │  0000_10_dns-operator_...                                           │   │
+│  │  0000_10_kube-apiserver-operator_...                                │   │
+│  │  ...                                                                 │   │
+│  │  执行: kubectl apply --server-side                                   │   │
+│  │  等待: ClusterOperator.Available=True                               │   │
+│  │        ClusterOperator.Progressing=False                            │   │
+│  │        ClusterOperator.Degraded=False                               │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                              │
+│                              ▼                                              │
+│  Runlevel 50 (中等优先级组件)                                               │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  0000_50_cluster-openshift-controller_...                           │   │
+│  │  0000_50_cluster-openshift-apiserver_...                            │   │
+│  │  ...                                                                 │   │
+│  │  执行 + 等待 (同上)                                                  │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                              │
+│                              ▼                                              │
+│  Runlevel 90 (低优先级组件)                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  0000_90_cluster-openshift-ingress_...                              │   │
+│  │  0000_90_cluster-openshift-console_...                              │   │
+│  │  ...                                                                 │   │
+│  │  执行 + 等待 (同上)                                                  │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                              │                                              │
+│                              ▼                                              │
+│  更新 ClusterVersion Status                                                 │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │  status:                                                              │   │
+│  │    history:                                                           │   │
+│  │      - version: 4.14.1                                               │   │
+│  │        state: Completed                                              │   │
+│  │    conditions:                                                        │   │
+│  │      - type: Available                                               │   │
+│  │        status: "True"                                                │   │
+│  │      - type: Progressing                                             │   │
+│  │        status: "False"                                               │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 5.3 ClusterOperator 状态等待逻辑
+
+```go
+func (c *ClusterVersionOperator) waitForClusterOperator(ctx context.Context, name string, timeout time.Duration) error {
+    ticker := time.NewTicker(5 * time.Second)
+    defer ticker.Stop()
+
+    timeoutCh := time.After(timeout)
+
+    for {
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        case <-timeoutCh:
+            return fmt.Errorf("timeout waiting for ClusterOperator %s", name)
+        case <-ticker.C:
+            co := &configv1.ClusterOperator{}
+            if err := c.client.Get(ctx, client.ObjectKey{Name: name}, co); err != nil {
+                continue
+            }
+
+            available := false
+            progressing := false
+            degraded := false
+
+            for _, cond := range co.Status.Conditions {
+                switch cond.Type {
+                case configv1.OperatorAvailable:
+                    available = cond.Status == corev1.ConditionTrue
+                case configv1.OperatorProgressing:
+                    progressing = cond.Status == corev1.ConditionTrue
+                case configv1.OperatorDegraded:
+                    degraded = cond.Status == corev1.ConditionTrue
+                }
+            }
+
+            if available && !progressing && !degraded {
+                return nil
+            }
+
+            if degraded {
+                return fmt.Errorf("ClusterOperator %s is degraded: %s", name, getConditionMessage(co, configv1.OperatorDegraded))
+            }
+        }
+    }
+}
+```
+
+## 6. 安全机制
+
+### 6.1 Override 机制
+
+```yaml
+apiVersion: config.openshift.io/v1
+kind: ClusterVersion
+metadata:
+  name: version
+spec:
+  overrides:
+    - kind: Deployment
+      name: etcd-operator
+      namespace: openshift-etcd-operator
+      unmanaged: true
+```
+
+```go
+func (c *ClusterVersionOperator) isOverridden(obj *unstructured.Unstructured) bool {
+    for _, override := range c.overrides {
+        if override.Kind == obj.GetKind() &&
+           override.Name == obj.GetName() &&
+           override.Namespace == obj.GetNamespace() &&
+           override.Unmanaged {
+            return true
+        }
+    }
+    return false
+}
+```
+
+### 6.2 版本验证
+
+```go
+func (c *ClusterVersionOperator) validateUpdate(ctx context.Context, from, to string) error {
+    if err := c.validateVersionFormat(to); err != nil {
+        return err
+    }
+
+    if err := c.validateUpdatePath(ctx, from, to); err != nil {
+        return err
+    }
+
+    if err := c.validatePayloadSignature(ctx, to); err != nil {
+        return err
+    }
+
+    return nil
+}
+
+func (c *ClusterVersionOperator) validateUpdatePath(ctx context.Context, from, to string) error {
+    graph, err := c.updateClient.FetchUpdateGraph(ctx, c.channel)
+    if err != nil {
+        return err
+    }
+
+    fromIndex := -1
+    toIndex := -1
+
+    for i, node := range graph.Nodes {
+        if node.Version == from {
+            fromIndex = i
+        }
+        if node.Version == to {
+            toIndex = i
+        }
+    }
+
+    if fromIndex == -1 || toIndex == -1 {
+        return fmt.Errorf("invalid version in update graph")
+    }
+
+    if !c.hasPath(graph, fromIndex, toIndex) {
+        return fmt.Errorf("no valid update path from %s to %s", from, to)
+    }
+
+    return nil
+}
+```
+
+## 7. 与其他组件的交互
+
+### 7.1 CVO 与 MCO (Machine Config Operator) 交互
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      CVO 与 MCO 交互流程                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  1. CVO 更新 Control Plane 组件                                             │
+│     ┌─────────────┐                                                        │
+│     │    CVO      │ ──► 更新 kube-apiserver, etcd, controller-manager      │
+│     └─────────────┘                                                        │
+│                                                                             │
+│  2. CVO 更新 MCO                                                            │
+│     ┌─────────────┐                                                        │
+│     │    CVO      │ ──► 更新 machine-config-operator                       │
+│     └─────────────┘                                                        │
+│                                                                             │
+│  3. MCO 更新节点操作系统                                                    │
+│     ┌─────────────┐    ┌─────────────┐    ┌─────────────┐                 │
+│     │    MCO      │ ──►│ Machine     │ ──►│ Machine     │                 │
+│     │             │    │ Config      │    │ Config      │                 │
+│     │             │    │ Server      │    │ Daemon      │                 │
+│     └─────────────┘    └─────────────┘    └─────────────┘                 │
+│                                                   │                         │
+│                                                   ▼                         │
+│                                            滚动更新节点                      │
+│                                            (CoreOS + Kubelet)              │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 7.2 CVO 与 OLM 的关系
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        CVO 与 OLM 的职责划分                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                         CVO 管理范围                                 │   │
+│  │  - ClusterOperator (系统级 Operator)                                │   │
+│  │  - 核心组件: etcd, dns, kube-apiserver, ingress, console...         │   │
+│  │  - 通过 Release Image 分发                                          │   │
+│  │  - 安装时自动部署                                                    │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │                         OLM 管理范围                                 │   │
+│  │  - 用户级 Operator                                                   │   │
+│  │  - 可选组件: cert-manager, prometheus, custom operators...          │   │
+│  │  - 通过 CatalogSource 分发                                          │   │
+│  │  - 用户按需安装                                                      │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  交互点:                                                                    │
+│  - OLM 本身是 CVO 管理的 ClusterOperator                                   │
+│  - CVO 升级时可能触发 OLM 升级                                              │
+│  - OLM 管理的 Operator 不受 CVO 版本约束                                    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+## 8. 总结
+
+### 8.1 设计亮点
+
+| 特性 | 描述 |
+|------|------|
+| **声明式版本管理** | 通过 ClusterVersion CRD 实现声明式版本控制 |
+| **Payload 机制** | 统一打包和分发所有组件清单 |
+| **Runlevel 分级** | 按优先级有序执行，确保依赖关系 |
+| **状态聚合** | 聚合所有 ClusterOperator 状态，提供全局视图 |
+| **安全升级** | 支持渐进式升级、暂停、回滚、Override |
+| **幂等操作** | 使用 Server-Side Apply 确保幂等性 |
+
+### 8.2 与 BKE 的对比
+
+| 维度 | OpenShift CVO | BKE |
+|------|---------------|-----|
+| **架构模式** | Operator 模式 | Cluster API Provider 模式 |
+| **版本管理** | ClusterVersion CRD | BKECluster CRD |
+| **组件管理** | ClusterOperator CRD | 自定义 Controller |
+| **升级机制** | Release Image + Runlevel | Manifests + Template |
+| **状态监控** | 条件聚合 | Phase 状态机 |
+| **分发方式** | Release Image (容器镜像) | Manifests (文件系统) |
+
+CVO 的设计思想为 BKE 的版本管理和升级机制提供了很好的参考，特别是：
+- 声明式版本管理
+- 组件状态聚合
+- 分级执行机制
+- 安全升级策略
+        
