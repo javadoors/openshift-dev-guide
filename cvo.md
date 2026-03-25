@@ -549,3 +549,215 @@ flowchart TD
 
 这样你就能直观地看到：**一旦某个 Operator 出现 `Degraded`，CVO 会立即中断升级并报告错误，确保集群安全。**  
 
+## ImageStream
+**在 OpenShift 中，ImageStream 的作用是为镜像提供一个“逻辑引用层”，让你在集群内部通过标签来管理和追踪镜像版本，而不是直接依赖外部镜像地址。它能触发自动构建和部署，使应用始终保持最新镜像。**  [docs.redhat.com](https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/images/managing-image-streams)  [Tutorial Works](https://www.tutorialworks.com/openshift-imagestreams/)  [Devopsschool.com](https://www.devopsschool.com/blog/what-is-imagestreams-step-by-step-tutorials/)  
+### 🔑 ImageStream 的核心作用
+- **镜像引用管理**：ImageStream 并不存储镜像本身，而是保存镜像的引用（通常是外部仓库的镜像地址），并通过标签（tags）来标识不同版本。  
+- **版本追踪**：当外部镜像更新时，ImageStream 可以检测到变化，并更新对应的 tag。  
+- **自动触发**：结合 BuildConfig 或 DeploymentConfig，ImageStream 的更新可以触发自动构建或应用滚动更新。  
+- **集群内统一入口**：开发者和运维人员可以通过 ImageStream 名称来引用镜像，而不必关心具体的外部仓库地址。  
+### 📊 与直接使用镜像的区别
+| 使用方式 | 特点 | 缺点 |
+|----------|------|------|
+| **直接使用镜像地址** | Pod 直接拉取 `nginx:latest` | Kubernetes 不会自动检测镜像更新，需手动重启或 rollout |
+| **使用 ImageStream** | 通过 `ImageStreamTag` 引用镜像，自动追踪更新 | 需要额外的 OpenShift 配置，但能实现自动化和版本管理 |
+### 📌 使用场景
+- **CI/CD 流程**：当构建完成并推送新镜像时，ImageStream 更新触发新的部署。  
+- **版本管理**：通过 `ImageStreamTag` 管理不同版本（如 `frontend:v1`、`frontend:v2`）。  
+- **隔离与安全**：集群内部统一使用 ImageStream 引用，避免直接暴露外部镜像仓库地址。  
+### ⚠️ 注意事项
+- **不是镜像仓库**：ImageStream 不存储镜像，只是引用和管理。  
+- **依赖 OpenShift 特性**：这是 OpenShift 特有的功能，原生 Kubernetes 没有 ImageStream。  
+- **更新策略**：要结合 BuildConfig/DeploymentConfig 才能发挥自动化优势。  
+
+✅ 总结：**ImageStream 是 OpenShift 的镜像管理抽象层，提供版本追踪、自动触发和统一引用入口。它让应用在集群内始终保持最新镜像，而无需手动干预。**  
+### ImageStream 与 BuildConfig/DeploymentConfig 的交互流程图
+直观展示它如何触发自动构建和部署：  
+```mermaid
+flowchart TD
+    A[开发者推送新镜像到外部仓库] --> B[ImageStream 监控镜像更新]
+    B -->|检测到新版本| C[更新 ImageStreamTag]
+    C -->|触发事件| D[BuildConfig]
+    D --> E[执行构建流程]
+    E --> F[生成新应用镜像]
+    F --> G[更新 ImageStreamTag]
+
+    G -->|触发事件| H[DeploymentConfig]
+    H --> I[滚动更新应用 Pod]
+    I --> J[集群运行最新镜像版本]
+```
+📌 图解说明
+- **ImageStream**：监控外部镜像仓库或构建结果，一旦发现新镜像就更新 `ImageStreamTag`。  
+- **BuildConfig**：当 ImageStream 更新时，可以触发新的构建流程，生成应用镜像。  
+- **DeploymentConfig**：当 ImageStreamTag 更新时，会触发应用的滚动更新，确保 Pod 使用最新镜像。  
+- **最终效果**：开发者只需推送新镜像，OpenShift 就能自动完成构建与部署更新。  
+
+这样你就能直观地看到：**ImageStream 是连接镜像更新、构建和部署的桥梁**，让 CI/CD 流程在 OpenShift 中实现自动化。  
+
+## ImageStream/ImageStreamTag 与 BuildConfig/DeploymentConfig
+在 OpenShift 中，**ImageStream/ImageStreamTag 与 BuildConfig/DeploymentConfig 是实现自动化构建与部署的关键组合**。它们之间的关系可以这样理解：  
+### 📌 ImageStream / ImageStreamTag
+- **ImageStream**：镜像的逻辑引用层，不存储镜像本身，而是追踪镜像的版本。  
+- **ImageStreamTag**：ImageStream 的具体版本标签，例如 `frontend:latest` 或 `frontend:v1`。  
+- **作用**：当镜像更新时，ImageStreamTag 会变化，并触发相关的构建或部署。  
+### 📌 BuildConfig
+- **作用**：定义应用的构建流程（源码 → 镜像）。  
+- **与 ImageStreamTag 的关系**：  
+  - 可以指定某个 ImageStreamTag 作为 **构建基础镜像**。  
+  - 构建完成后会将新镜像写入目标 ImageStreamTag。  
+- **效果**：镜像更新后，ImageStreamTag 变化，触发后续部署。  
+### 📌 DeploymentConfig
+- **作用**：定义应用的部署策略（副本数、滚动更新等）。  
+- **与 ImageStreamTag 的关系**：  
+  - 使用某个 ImageStreamTag 作为应用运行镜像。  
+  - 当该 ImageStreamTag 更新时，DeploymentConfig 会触发滚动更新，确保 Pod 使用最新镜像。  
+### 📊 三者关系总结
+| 组件 | 作用 | 与 ImageStreamTag 的关系 |
+|------|------|----------------------|
+| **ImageStream** | 镜像版本追踪与事件触发 | 提供统一引用入口 |
+| **BuildConfig** | 定义构建流程，生成镜像 | 输入/输出依赖 ImageStreamTag |
+| **DeploymentConfig** | 定义部署策略，管理 Pod | 使用 ImageStreamTag 作为运行镜像 |
+### 📌 示例说明
+假设你有一个前端应用：  
+1. **BuildConfig** 定义：  
+   - 使用 `nodejs:14` 作为基础镜像（来自 ImageStreamTag）。  
+   - 构建完成后输出镜像到 `frontend:latest` ImageStreamTag。  
+2. **ImageStream**：  
+   - 管理 `frontend` 镜像的版本。  
+   - 当构建完成时，`frontend:latest` 更新。  
+3. **DeploymentConfig**：  
+   - 使用 `frontend:latest` 作为应用运行镜像。  
+   - 当 `frontend:latest` 更新时，自动触发滚动更新 Pod。  
+### 📌 示例 YAML 片段
+```yaml
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: frontend-build
+spec:
+  output:
+    to:
+      kind: ImageStreamTag
+      name: frontend:latest
+---
+apiVersion: apps.openshift.io/v1
+kind: DeploymentConfig
+metadata:
+  name: frontend-deploy
+spec:
+  template:
+    spec:
+      containers:
+      - name: frontend
+        image: frontend:latest
+```
+✅ 总结：**ImageStreamTag 是连接 BuildConfig 与 DeploymentConfig 的纽带**。BuildConfig 负责生成镜像并更新 ImageStreamTag，DeploymentConfig 监听该标签变化并自动更新 Pod，从而实现完整的 CI/CD 流程。  
+### CI/CD 时序图
+展示从“代码提交 → 构建 → 镜像更新 → 部署更新”的全过程：  
+```mermaid
+sequenceDiagram
+    participant Dev as 开发者
+    participant Git as 代码仓库
+    participant BuildConfig as BuildConfig
+    participant ImageStream as ImageStream/ImageStreamTag
+    participant DeployConfig as DeploymentConfig
+    participant Cluster as 集群:Pod
+
+    Dev->>Git: 提交代码
+    Git-->>BuildConfig: 触发构建事件
+    BuildConfig->>BuildConfig: 执行构建流程:源码→镜像
+    BuildConfig->>ImageStream: 输出新镜像并更新 ImageStreamTag
+
+    ImageStream-->>DeployConfig: 通知镜像更新
+    DeployConfig->>Cluster: 滚动更新 Pod
+    Cluster-->>Dev: 应用运行最新版本
+```
+ 📌 图解说明
+1. **开发者提交代码** → 推送到 Git 仓库。  
+2. **BuildConfig** 检测到代码变更 → 执行构建流程，生成新镜像。  
+3. **ImageStreamTag 更新** → 记录新镜像版本。  
+4. **DeploymentConfig** 监听到 ImageStreamTag 更新 → 自动触发滚动更新。  
+5. **集群 Pod 更新** → 应用运行最新镜像版本，完成 CI/CD 流程。  
+
+这样你就能直观地看到：**ImageStream 是连接构建与部署的桥梁，BuildConfig 负责生成镜像，DeploymentConfig 负责应用更新。**  
+
+## /release-manifests中的image-references与release-metadata
+在 OpenShift 的 **`/release-manifests`** 目录中，常见的两个关键文件是 **`image-references`** 和 **`release-metadata`**，它们分别承担不同的作用：  
+### 📌 `image-references`
+- **内容**：列出该版本所包含的所有镜像引用。  
+- **结构**：通常是一个 YAML 文件，包含镜像名称、标签、以及对应的 registry 地址。  
+- **作用**：  
+  - 为 CVO 提供集群升级时需要拉取的镜像清单。  
+  - 确保集群中每个 Operator 和组件都能找到对应的镜像。  
+  - 在升级过程中，CVO 会根据 `image-references` 来更新各个组件的镜像版本。  
+
+**示例片段：**
+```yaml
+kind: ImageStream
+metadata:
+  name: cluster-version-operator
+spec:
+  tags:
+    - name: v4.13.0
+      from:
+        kind: DockerImage
+        name: quay.io/openshift/cluster-version-operator:v4.13.0
+```
+### 📌 `release-metadata`
+- **内容**：描述该 OpenShift 版本的元信息。  
+- **字段**：  
+  - `metadata.name`：版本号，例如 `4.13.0`。  
+  - `metadata.creationTimestamp`：版本构建时间。  
+  - `metadata.description`：版本说明。  
+  - `metadata.upgrades`：可升级的目标版本范围。  
+- **作用**：  
+  - 为 CVO 提供升级策略和版本边界。  
+  - 确保集群升级遵循官方定义的路径。  
+  - 用于校验当前集群是否允许升级到目标版本。  
+
+**示例片段：**
+```yaml
+metadata:
+  name: 4.13.0
+  creationTimestamp: "2026-03-01T12:00:00Z"
+  description: "OpenShift 4.13.0 release"
+  upgrades:
+    - 4.12.0
+    - 4.12.5
+```
+### 📊 对比总结
+| 文件 | 内容 | 作用 |
+|------|------|------|
+| **image-references** | 镜像清单（Operator/组件镜像） | 提供升级时需要的镜像地址 |
+| **release-metadata** | 版本元信息（版本号、升级路径、说明） | 定义升级策略与版本边界 |
+✅ 总结：**`image-references` 是镜像层面的清单，`release-metadata` 是版本层面的描述。**前者保证升级时镜像可用，后者保证升级路径合法，两者共同作用，确保 OpenShift 集群升级安全、可控。  
+### 流程图
+展示 CVO 如何同时使用 `/release-manifests` 中的 `image-references` 与 `release-metadata` 来完成升级：  
+```mermaid
+flowchart TD
+    A[用户请求升级] --> B[CVO 读取 /release-manifests]
+    
+    B --> C[解析 release-metadata]
+    C --> D{检查升级合法性}
+    D -->|合法| E[继续升级]
+    D -->|非法| F[阻止升级并报错]
+
+    B --> G[解析 image-references]
+    G --> H[获取目标版本镜像清单]
+    H --> I[更新 Operator 与组件镜像]
+
+    E --> J[CVO 应用 manifests 部署资源]
+    J --> K[ClusterOperator 更新 status]
+    K --> L[报告升级进度与结果]
+```
+📌 图解说明
+- **release-metadata**：提供版本号、升级路径、合法性校验。CVO 会先检查当前版本是否允许升级到目标版本。  
+- **image-references**：提供目标版本所需的镜像清单。CVO 根据它来拉取并更新各个 Operator 与组件的镜像。  
+- **升级流程**：  
+  1. 用户请求升级。  
+  2. CVO 读取 `release-metadata` → 校验升级合法性。  
+  3. CVO 读取 `image-references` → 获取镜像清单。  
+  4. 应用 `/manifests` 部署资源。  
+  5. 更新 `ClusterOperator.status` → 报告升级进度。  
+
+这样你就能直观地看到：**`release-metadata` 决定能不能升级，`image-references` 决定升级用哪些镜像，CVO 将两者结合来完成整个升级过程。**  
