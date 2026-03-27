@@ -2983,3 +2983,3225 @@ Ignition类：Bootstrap, Master, Worker配置
 这个完整的Asset体系为openFuyao的架构设计提供了清晰的参考模型。
 
 
+# 基于UPI/IPI场景和多操作系统支持的要求，设计一个可扩展的Cluster API框架方案
+## openFuyao 可扩展安装框架方案
+### 一、总体架构设计
+#### 1.1 架构层次
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    openFuyao Installer                       │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │           Asset Generation Engine                     │  │
+│  │  ┌────────────┐  ┌────────────┐  ┌────────────┐    │  │
+│  │  │ Config     │  │ Certificate│  │ Cluster    │    │  │
+│  │  │ Assets     │  │ Assets     │  │ API Assets │    │  │
+│  │  └────────────┘  └────────────┘  └────────────┘    │  │
+│  └──────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────────┐
+│              Provider Abstraction Layer                      │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │         Infrastructure Provider Interface             │  │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐          │  │
+│  │  │   UPI    │  │   IPI    │  │  Cloud   │          │  │
+│  │  │ Provider │  │ Provider │  │ Provider │          │  │
+│  │  └──────────┘  └──────────┘  └──────────┘          │  │
+│  └──────────────────────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │          Bootstrap Provider Interface                 │  │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐          │  │
+│  │  │ Kubeadm  │  │  RKE2    │  │ Custom   │          │  │
+│  │  │ Provider │  │ Provider │  │ Provider │          │  │
+│  │  └──────────┘  └──────────┘  └──────────┘          │  │
+│  └──────────────────────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │           OS Provider Interface                       │  │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐          │  │
+│  │  │ Ubuntu   │  │ CentOS   │  │  RHCOS   │          │  │
+│  │  │ Provider │  │ Provider │  │ Provider │          │  │
+│  │  └──────────┘  └──────────┘  └──────────┘          │  │
+│  └──────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────────┐
+│                  Cluster API Management                      │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │              Cluster API Controllers                  │  │
+│  └──────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────────┐
+│                   Target Cluster                             │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐    │
+│  │ Master Node  │  │ Master Node  │  │ Worker Node  │    │
+│  │  (Any OS)    │  │  (Any OS)    │  │  (Any OS)    │    │
+│  └──────────────┘  └──────────────┘  └──────────────┘    │
+└─────────────────────────────────────────────────────────────┘
+```
+#### 1.2 核心接口定义
+```go
+// pkg/provider/interfaces.go
+package provider
+
+import (
+    "context"
+    
+    "github.com/bocloud/bke/pkg/asset"
+    clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+)
+
+// InfrastructureProvider 基础设施提供者接口
+type InfrastructureProvider interface {
+    // Name 返回提供者名称
+    Name() string
+    
+    // Type 返回提供者类型
+    Type() ProviderType
+    
+    // GenerateClusterAssets 生成集群基础设施资产
+    GenerateClusterAssets(ctx context.Context, config *InstallConfig) ([]asset.WritableAsset, error)
+    
+    // GenerateMachineAssets 生成机器基础设施资产
+    GenerateMachineAssets(ctx context.Context, config *InstallConfig, role string) ([]asset.WritableAsset, error)
+    
+    // Validate 验证配置
+    Validate(config *InstallConfig) error
+    
+    // Preflight 预检查
+    Preflight(ctx context.Context, config *InstallConfig) error
+    
+    // PostInstall 安装后处理
+    PostInstall(ctx context.Context, config *InstallConfig) error
+}
+
+// ProviderType 提供者类型
+type ProviderType string
+
+const (
+    ProviderTypeUPI ProviderType = "upi"  // 用户提供的设施
+    ProviderTypeIPI ProviderType = "ipi"  // 安装器提供的设施
+    ProviderTypeCloud ProviderType = "cloud" // 云提供商
+)
+
+// BootstrapProvider 引导提供者接口
+type BootstrapProvider interface {
+    // Name 返回提供者名称
+    Name() string
+    
+    // GenerateBootstrapAssets 生成引导资产
+    GenerateBootstrapAssets(ctx context.Context, config *InstallConfig, role string) ([]asset.WritableAsset, error)
+    
+    // GenerateBootstrapData 生成引导数据
+    GenerateBootstrapData(ctx context.Context, config *InstallConfig, machine *clusterv1.Machine) ([]byte, error)
+    
+    // Validate 验证配置
+    Validate(config *InstallConfig) error
+}
+
+// OSProvider 操作系统提供者接口
+type OSProvider interface {
+    // Name 返回操作系统名称
+    Name() string
+    
+    // Type 返回操作系统类型
+    Type() OSType
+    
+    // GenerateOSAssets 生成操作系统相关资产
+    GenerateOSAssets(ctx context.Context, config *InstallConfig) ([]asset.WritableAsset, error)
+    
+    // GenerateBootstrapScript 生成引导脚本
+    GenerateBootstrapScript(ctx context.Context, config *InstallConfig, role string) ([]byte, error)
+    
+    // GetPackageList 获取软件包列表
+    GetPackageList() []string
+    
+    // GetSystemServiceNames 获取系统服务名称
+    GetSystemServiceNames() map[string]string
+    
+    // Validate 验证操作系统
+    Validate(ctx context.Context, node *NodeInfo) error
+}
+
+// OSType 操作系统类型
+type OSType string
+
+const (
+    OSTypeUbuntu  OSType = "ubuntu"
+    OSTypeCentOS  OSType = "centos"
+    OSTypeRHCOS   OSType = "rhcos"
+    OSTypeRHEL    OSType = "rhel"
+    OSTypeDebian  OSType = "debian"
+    OSTypeWindows OSType = "windows"
+)
+
+// ProviderFactory 提供者工厂接口
+type ProviderFactory interface {
+    // GetInfrastructureProvider 获取基础设施提供者
+    GetInfrastructureProvider(providerType ProviderType, platform string) (InfrastructureProvider, error)
+    
+    // GetBootstrapProvider 获取引导提供者
+    GetBootstrapProvider(bootstrapType string) (BootstrapProvider, error)
+    
+    // GetOSProvider 获取操作系统提供者
+    GetOSProvider(osType OSType) (OSProvider, error)
+    
+    // RegisterInfrastructureProvider 注册基础设施提供者
+    RegisterInfrastructureProvider(provider InfrastructureProvider) error
+    
+    // RegisterBootstrapProvider 注册引导提供者
+    RegisterBootstrapProvider(provider BootstrapProvider) error
+    
+    // RegisterOSProvider 注册操作系统提供者
+    RegisterOSProvider(provider OSProvider) error
+}
+```
+### 二、Infrastructure Provider实现
+#### 2.1 UPI Provider实现
+```go
+// pkg/provider/infrastructure/upi/provider.go
+package upi
+
+import (
+    "context"
+    "fmt"
+    
+    "github.com/bocloud/bke/pkg/asset"
+    "github.com/bocloud/bke/pkg/provider"
+    infrav1alpha1 "github.com/bocloud/bke/api/infrastructure/v1alpha1"
+)
+
+// UPIProvider 用户提供的设施提供者
+type UPIProvider struct {
+    osProvider provider.OSProvider
+}
+
+func NewUPIProvider(osProvider provider.OSProvider) *UPIProvider {
+    return &UPIProvider{
+        osProvider: osProvider,
+    }
+}
+
+func (u *UPIProvider) Name() string {
+    return "upi"
+}
+
+func (u *UPIProvider) Type() provider.ProviderType {
+    return provider.ProviderTypeUPI
+}
+
+func (u *UPIProvider) GenerateClusterAssets(ctx context.Context, config *provider.InstallConfig) ([]asset.WritableAsset, error) {
+    assets := []asset.WritableAsset{}
+    
+    // 1. 生成BareMetalCluster资产
+    bareMetalClusterAsset := &BareMetalClusterAsset{
+        Config: config,
+    }
+    if err := bareMetalClusterAsset.Generate(ctx, nil); err != nil {
+        return nil, err
+    }
+    assets = append(assets, bareMetalClusterAsset)
+    
+    return assets, nil
+}
+
+func (u *UPIProvider) GenerateMachineAssets(ctx context.Context, config *provider.InstallConfig, role string) ([]asset.WritableAsset, error) {
+    assets := []asset.WritableAsset{}
+    
+    // 1. 生成BareMetalMachineTemplate资产
+    machineTemplateAsset := &BareMetalMachineTemplateAsset{
+        Config: config,
+        Role:   role,
+    }
+    if err := machineTemplateAsset.Generate(ctx, nil); err != nil {
+        return nil, err
+    }
+    assets = append(assets, machineTemplateAsset)
+    
+    return assets, nil
+}
+
+func (u *UPIProvider) Validate(config *provider.InstallConfig) error {
+    // 验证UPI配置
+    if config.Spec.Platform.Type != "baremetal" && config.Spec.Platform.Type != "vsphere" {
+        return fmt.Errorf("UPI provider only supports baremetal and vsphere platforms")
+    }
+    
+    // 验证节点配置
+    if len(config.Spec.Nodes) == 0 {
+        return fmt.Errorf("at least one node is required")
+    }
+    
+    // 验证控制平面节点
+    masterCount := 0
+    for _, node := range config.Spec.Nodes {
+        if contains(node.Roles, "master") {
+            masterCount++
+        }
+    }
+    
+    if masterCount == 0 {
+        return fmt.Errorf("at least one master node is required")
+    }
+    
+    if masterCount%2 == 0 {
+        return fmt.Errorf("master node count must be odd for etcd quorum")
+    }
+    
+    return nil
+}
+
+func (u *UPIProvider) Preflight(ctx context.Context, config *provider.InstallConfig) error {
+    // 1. 检查节点连通性
+    if err := u.checkNodeConnectivity(ctx, config); err != nil {
+        return err
+    }
+    
+    // 2. 检查操作系统
+    if err := u.checkOperatingSystems(ctx, config); err != nil {
+        return err
+    }
+    
+    // 3. 检查系统资源
+    if err := u.checkSystemResources(ctx, config); err != nil {
+        return err
+    }
+    
+    // 4. 检查网络配置
+    if err := u.checkNetworkConfiguration(ctx, config); err != nil {
+        return err
+    }
+    
+    return nil
+}
+
+func (u *UPIProvider) checkNodeConnectivity(ctx context.Context, config *provider.InstallConfig) error {
+    for _, node := range config.Spec.Nodes {
+        // SSH连接检查
+        executor, err := executor.NewSSHExecutor(
+            node.IP,
+            22,
+            node.SSHUser,
+            []byte(node.SSHKey),
+        )
+        if err != nil {
+            return fmt.Errorf("failed to connect to node %s: %v", node.Hostname, err)
+        }
+        executor.Close()
+    }
+    return nil
+}
+
+func (u *UPIProvider) checkOperatingSystems(ctx context.Context, config *provider.InstallConfig) error {
+    for _, node := range config.Spec.Nodes {
+        executor, err := executor.NewSSHExecutor(
+            node.IP,
+            22,
+            node.SSHUser,
+            []byte(node.SSHKey),
+        )
+        if err != nil {
+            return err
+        }
+        defer executor.Close()
+        
+        // 检查操作系统
+        output, err := executor.Execute("cat /etc/os-release")
+        if err != nil {
+            return fmt.Errorf("failed to check OS on node %s: %v", node.Hostname, err)
+        }
+        
+        // 验证操作系统
+        if err := u.osProvider.Validate(ctx, &node); err != nil {
+            return fmt.Errorf("OS validation failed on node %s: %v", node.Hostname, err)
+        }
+    }
+    return nil
+}
+
+func (u *UPIProvider) PostInstall(ctx context.Context, config *provider.InstallConfig) error {
+    // UPI场景：生成用户需要配置的清单
+    if config.Spec.Platform.UserProvidedDNS {
+        if err := u.generateDNSRecordsList(config); err != nil {
+            return err
+        }
+    }
+    
+    if config.Spec.Platform.UserProvidedLB {
+        if err := u.generateLBConfigList(config); err != nil {
+            return err
+        }
+    }
+    
+    return nil
+}
+
+func (u *UPIProvider) generateDNSRecordsList(config *provider.InstallConfig) error {
+    // 生成DNS记录清单
+    records := []DNSRecord{
+        {
+            Name:  fmt.Sprintf("api.%s", config.Spec.ClusterDomain),
+            Type:  "A",
+            Value: config.Spec.ControlPlaneEndpoint,
+        },
+        {
+            Name:  fmt.Sprintf("api-int.%s", config.Spec.ClusterDomain),
+            Type:  "A",
+            Value: config.Spec.ControlPlaneEndpoint,
+        },
+        {
+            Name:  fmt.Sprintf("*.apps.%s", config.Spec.ClusterDomain),
+            Type:  "A",
+            Value: config.Spec.ControlPlaneEndpoint,
+        },
+    }
+    
+    data, _ := yaml.Marshal(records)
+    return os.WriteFile(filepath.Join(config.InstallDir, "dns-records.yaml"), data, 0644)
+}
+
+// BareMetalClusterAsset UPI场景集群资产
+type BareMetalClusterAsset struct {
+    Config *provider.InstallConfig
+    Files  []*asset.File
+}
+
+func (b *BareMetalClusterAsset) Dependencies() []asset.Asset {
+    return nil
+}
+
+func (b *BareMetalClusterAsset) Generate(ctx context.Context, parents asset.Parents) error {
+    bareMetalCluster := &infrav1alpha1.BareMetalCluster{
+        TypeMeta: metav1.TypeMeta{
+            APIVersion: "infrastructure.cluster.x-k8s.io/v1alpha1",
+            Kind:       "BareMetalCluster",
+        },
+        ObjectMeta: metav1.ObjectMeta{
+            Name:      b.Config.Name,
+            Namespace: "default",
+        },
+        Spec: infrav1alpha1.BareMetalClusterSpec{
+            ControlPlaneEndpoint: clusterv1.APIEndpoint{
+                Host: b.Config.Spec.ControlPlaneEndpoint,
+                Port: 6443,
+            },
+            BaseDomain: b.Config.Spec.BaseDomain,
+            NetworkSpec: infrav1alpha1.NetworkSpec{
+                DNSDomain:     b.Config.Spec.Networking.DNSDomain,
+                PodSubnet:     b.Config.Spec.Networking.PodSubnet,
+                ServiceSubnet: b.Config.Spec.Networking.ServiceSubnet,
+            },
+            UserProvidedDNS: b.Config.Spec.Platform.UserProvidedDNS,
+            UserProvidedLB:  b.Config.Spec.Platform.UserProvidedLB,
+        },
+    }
+    
+    data, _ := yaml.Marshal(bareMetalCluster)
+    b.Files = []*asset.File{
+        {
+            Filename: "cluster-api/baremetal-cluster.yaml",
+            Data:     data,
+        },
+    }
+    
+    return nil
+}
+```
+#### 2.2 IPI Provider实现
+```go
+// pkg/provider/infrastructure/ipi/provider.go
+package ipi
+
+import (
+    "context"
+    "fmt"
+    
+    "github.com/bocloud/bke/pkg/asset"
+    "github.com/bocloud/bke/pkg/provider"
+    infrav1alpha1 "github.com/bocloud/bke/api/infrastructure/v1alpha1"
+)
+
+// IPIProvider 安装器提供的设施提供者
+type IPIProvider struct {
+    platform    string
+    osProvider  provider.OSProvider
+    terraform   *TerraformExecutor
+}
+
+func NewIPIProvider(platform string, osProvider provider.OSProvider) *IPIProvider {
+    return &IPIProvider{
+        platform:   platform,
+        osProvider: osProvider,
+        terraform:  NewTerraformExecutor(),
+    }
+}
+
+func (i *IPIProvider) Name() string {
+    return fmt.Sprintf("ipi-%s", i.platform)
+}
+
+func (i *IPIProvider) Type() provider.ProviderType {
+    return provider.ProviderTypeIPI
+}
+
+func (i *IPIProvider) GenerateClusterAssets(ctx context.Context, config *provider.InstallConfig) ([]asset.WritableAsset, error) {
+    assets := []asset.WritableAsset{}
+    
+    // 根据平台生成不同的资产
+    switch i.platform {
+    case "vsphere":
+        assets = append(assets, i.generateVSphereClusterAssets(config)...)
+    case "openstack":
+        assets = append(assets, i.generateOpenStackClusterAssets(config)...)
+    case "baremetal":
+        assets = append(assets, i.generateBareMetalClusterAssets(config)...)
+    default:
+        return nil, fmt.Errorf("unsupported platform: %s", i.platform)
+    }
+    
+    return assets, nil
+}
+
+func (i *IPIProvider) GenerateMachineAssets(ctx context.Context, config *provider.InstallConfig, role string) ([]asset.WritableAsset, error) {
+    assets := []asset.WritableAsset{}
+    
+    // 根据平台生成不同的机器资产
+    switch i.platform {
+    case "vsphere":
+        assets = append(assets, i.generateVSphereMachineAssets(config, role)...)
+    case "openstack":
+        assets = append(assets, i.generateOpenStackMachineAssets(config, role)...)
+    case "baremetal":
+        assets = append(assets, i.generateBareMetalMachineAssets(config, role)...)
+    default:
+        return nil, fmt.Errorf("unsupported platform: %s", i.platform)
+    }
+    
+    return assets, nil
+}
+
+func (i *IPIProvider) Validate(config *provider.InstallConfig) error {
+    // 验证IPI配置
+    if config.Spec.Platform.Type != i.platform {
+        return fmt.Errorf("platform mismatch: expected %s, got %s", i.platform, config.Spec.Platform.Type)
+    }
+    
+    // 验证平台特定配置
+    switch i.platform {
+    case "vsphere":
+        return i.validateVSphereConfig(config)
+    case "openstack":
+        return i.validateOpenStackConfig(config)
+    case "baremetal":
+        return i.validateBareMetalConfig(config)
+    }
+    
+    return nil
+}
+
+func (i *IPIProvider) Preflight(ctx context.Context, config *provider.InstallConfig) error {
+    // 1. 验证平台凭据
+    if err := i.validatePlatformCredentials(ctx, config); err != nil {
+        return err
+    }
+    
+    // 2. 检查资源配额
+    if err := i.checkResourceQuota(ctx, config); err != nil {
+        return err
+    }
+    
+    // 3. 检查网络配置
+    if err := i.checkNetworkConfiguration(ctx, config); err != nil {
+        return err
+    }
+    
+    return nil
+}
+
+func (i *IPIProvider) PostInstall(ctx context.Context, config *provider.InstallConfig) error {
+    // IPI场景：自动配置DNS和负载均衡器
+    if !config.Spec.Platform.UserProvidedDNS {
+        if err := i.configureDNS(ctx, config); err != nil {
+            return err
+        }
+    }
+    
+    if !config.Spec.Platform.UserProvidedLB {
+        if err := i.configureLoadBalancer(ctx, config); err != nil {
+            return err
+        }
+    }
+    
+    return nil
+}
+
+func (i *IPIProvider) generateVSphereClusterAssets(config *provider.InstallConfig) []asset.WritableAsset {
+    // 生成VSphere集群资产
+    return []asset.WritableAsset{
+        &VSphereClusterAsset{Config: config},
+        &VSphereNetworkAsset{Config: config},
+    }
+}
+
+func (i *IPIProvider) generateVSphereMachineAssets(config *provider.InstallConfig, role string) []asset.WritableAsset {
+    // 生成VSphere机器资产
+    return []asset.WritableAsset{
+        &VSphereMachineTemplateAsset{Config: config, Role: role},
+    }
+}
+
+// TerraformExecutor Terraform执行器
+type TerraformExecutor struct {
+    workDir string
+}
+
+func NewTerraformExecutor() *TerraformExecutor {
+    return &TerraformExecutor{
+        workDir: "/tmp/bke-terraform",
+    }
+}
+
+func (t *TerraformExecutor) Apply(ctx context.Context, config *provider.InstallConfig) error {
+    // 执行Terraform Apply
+    return nil
+}
+
+func (t *TerraformExecutor) Destroy(ctx context.Context, config *provider.InstallConfig) error {
+    // 执行Terraform Destroy
+    return nil
+}
+```
+### 三、OS Provider实现
+#### 3.1 Ubuntu Provider实现
+```go
+// pkg/provider/os/ubuntu/provider.go
+package ubuntu
+
+import (
+    "context"
+    "fmt"
+    "strings"
+    
+    "github.com/bocloud/bke/pkg/asset"
+    "github.com/bocloud/bke/pkg/provider"
+)
+
+// UbuntuProvider Ubuntu操作系统提供者
+type UbuntuProvider struct {
+    version string
+}
+
+func NewUbuntuProvider(version string) *UbuntuProvider {
+    return &UbuntuProvider{
+        version: version,
+    }
+}
+
+func (u *UbuntuProvider) Name() string {
+    return "ubuntu"
+}
+
+func (u *UbuntuProvider) Type() provider.OSType {
+    return provider.OSTypeUbuntu
+}
+
+func (u *UbuntuProvider) GenerateOSAssets(ctx context.Context, config *provider.InstallConfig) ([]asset.WritableAsset, error) {
+    assets := []asset.WritableAsset{}
+    
+    // 1. 生成Containerd配置
+    containerdAsset := &ContainerdConfigAsset{Config: config}
+    if err := containerdAsset.Generate(ctx, nil); err != nil {
+        return nil, err
+    }
+    assets = append(assets, containerdAsset)
+    
+    // 2. 生成系统配置
+    systemAsset := &SystemConfigAsset{Config: config}
+    if err := systemAsset.Generate(ctx, nil); err != nil {
+        return nil, err
+    }
+    assets = append(assets, systemAsset)
+    
+    return assets, nil
+}
+
+func (u *UbuntuProvider) GenerateBootstrapScript(ctx context.Context, config *provider.InstallConfig, role string) ([]byte, error) {
+    script := u.generateCommonScript(config)
+    
+    switch role {
+    case "master":
+        script += u.generateMasterScript(config)
+    case "worker":
+        script += u.generateWorkerScript(config)
+    }
+    
+    return []byte(script), nil
+}
+
+func (u *UbuntuProvider) generateCommonScript(config *provider.InstallConfig) string {
+    return `#!/bin/bash
+set -euo pipefail
+
+UBUNTU_COMMON_SCRIPT
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
+
+configure_system() {
+    log "Configuring system parameters..."
+    
+    cat > /etc/sysctl.d/99-kubernetes.conf <<EOF
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+EOF
+    
+    sysctl --system
+}
+
+configure_modules() {
+    log "Configuring kernel modules..."
+    
+    cat > /etc/modules-load.d/k8s.conf <<EOF
+overlay
+br_netfilter
+EOF
+    
+    modprobe overlay
+    modprobe br_netfilter
+}
+
+disable_swap() {
+    log "Disabling swap..."
+    swapoff -a
+    sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+}
+
+install_dependencies() {
+    log "Installing dependencies..."
+    
+    apt-get update
+    apt-get install -y \
+        apt-transport-https \
+        ca-certificates \
+        curl \
+        gnupg \
+        lsb-release \
+        jq \
+        socat \
+        conntrack \
+        ipset \
+        ipvsadm
+}
+
+install_containerd() {
+    log "Installing containerd..."
+    
+    if ! command -v containerd &> /dev/null; then
+        apt-get install -y containerd
+    fi
+}
+
+configure_containerd() {
+    log "Configuring containerd..."
+    
+    mkdir -p /etc/containerd
+    containerd config default > /etc/containerd/config.toml
+    sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+    systemctl restart containerd
+}
+
+install_kubernetes() {
+    local version=$1
+    
+    log "Installing Kubernetes $version..."
+    
+    if ! command -v kubeadm &> /dev/null; then
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/${version}/deb/Release.key | \
+            gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+        
+        echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${version}/deb/ /" | \
+            tee /etc/apt/sources.list.d/kubernetes.list
+        
+        apt-get update
+        apt-get install -y kubelet kubeadm kubectl
+        apt-mark hold kubelet kubeadm kubectl
+    fi
+}
+
+# 执行通用配置
+configure_system
+configure_modules
+disable_swap
+install_dependencies
+install_containerd
+configure_containerd
+install_kubernetes ` + config.Spec.KubernetesVersion + `
+`
+}
+
+func (u *UbuntuProvider) generateMasterScript(config *provider.InstallConfig) string {
+    return `
+UBUNTU_MASTER_SCRIPT
+
+create_kubeadm_config() {
+    log "Creating kubeadm configuration..."
+    
+    cat > /etc/kubernetes/kubeadm-config.yaml <<EOF
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: ClusterConfiguration
+kubernetesVersion: ` + config.Spec.KubernetesVersion + `
+controlPlaneEndpoint: "` + config.Spec.ControlPlaneEndpoint + `"
+networking:
+  dnsDomain: ` + config.Spec.Networking.DNSDomain + `
+  podSubnet: ` + config.Spec.Networking.PodSubnet + `
+  serviceSubnet: ` + config.Spec.Networking.ServiceSubnet + `
+EOF
+}
+
+initialize_cluster() {
+    log "Initializing Kubernetes cluster..."
+    
+    systemctl enable kubelet
+    kubeadm init --config /etc/kubernetes/kubeadm-config.yaml --upload-certs
+    
+    mkdir -p $HOME/.kube
+    cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+    chown $(id -u):$(id -g) $HOME/.kube/config
+}
+
+create_kubeadm_config
+initialize_cluster
+`
+}
+
+func (u *UbuntuProvider) generateWorkerScript(config *provider.InstallConfig) string {
+    return `
+UBUNTU_WORKER_SCRIPT
+
+wait_for_api_server() {
+    local api_server=$1
+    local max_retries=30
+    
+    log "Waiting for API server $api_server..."
+    
+    for i in $(seq 1 $max_retries); do
+        if curl -k -s https://${api_server}/healthz | grep -q "ok"; then
+            log "API server is ready"
+            return 0
+        fi
+        sleep 10
+    done
+    
+    log "API server is not ready"
+    return 1
+}
+
+join_cluster() {
+    local join_command=$1
+    
+    log "Joining cluster..."
+    
+    systemctl enable kubelet
+    bash -c "$join_command"
+}
+
+wait_for_api_server ` + config.Spec.ControlPlaneEndpoint + `
+join_cluster "$KUBEADM_JOIN_COMMAND"
+`
+}
+
+func (u *UbuntuProvider) GetPackageList() []string {
+    return []string{
+        "apt-transport-https",
+        "ca-certificates",
+        "curl",
+        "gnupg",
+        "lsb-release",
+        "jq",
+        "socat",
+        "conntrack",
+        "ipset",
+        "ipvsadm",
+        "containerd",
+        "kubelet",
+        "kubeadm",
+        "kubectl",
+    }
+}
+
+func (u *UbuntuProvider) GetSystemServiceNames() map[string]string {
+    return map[string]string{
+        "containerd": "containerd",
+        "kubelet":    "kubelet",
+    }
+}
+
+func (u *UbuntuProvider) Validate(ctx context.Context, node *provider.NodeInfo) error {
+    // 通过SSH验证操作系统
+    executor, err := executor.NewSSHExecutor(
+        node.IP,
+        22,
+        node.SSHUser,
+        []byte(node.SSHKey),
+    )
+    if err != nil {
+        return err
+    }
+    defer executor.Close()
+    
+    // 检查操作系统
+    output, err := executor.Execute("cat /etc/os-release")
+    if err != nil {
+        return err
+    }
+    
+    if !strings.Contains(strings.ToLower(output), "ubuntu") {
+        return fmt.Errorf("node %s is not running Ubuntu", node.Hostname)
+    }
+    
+    // 检查版本
+    if u.version != "" {
+        if !strings.Contains(output, u.version) {
+            return fmt.Errorf("node %s is not running Ubuntu %s", node.Hostname, u.version)
+        }
+    }
+    
+    return nil
+}
+```
+#### 3.2 CentOS Provider实现
+```go
+// pkg/provider/os/centos/provider.go
+package centos
+
+import (
+    "context"
+    "fmt"
+    "strings"
+    
+    "github.com/bocloud/bke/pkg/asset"
+    "github.com/bocloud/bke/pkg/provider"
+)
+
+// CentOSProvider CentOS操作系统提供者
+type CentOSProvider struct {
+    version string
+}
+
+func NewCentOSProvider(version string) *CentOSProvider {
+    return &CentOSProvider{
+        version: version,
+    }
+}
+
+func (c *CentOSProvider) Name() string {
+    return "centos"
+}
+
+func (c *CentOSProvider) Type() provider.OSType {
+    return provider.OSTypeCentOS
+}
+
+func (c *CentOSProvider) GenerateOSAssets(ctx context.Context, config *provider.InstallConfig) ([]asset.WritableAsset, error) {
+    assets := []asset.WritableAsset{}
+    
+    // 生成CentOS特定的配置资产
+    containerdAsset := &ContainerdConfigAsset{Config: config}
+    if err := containerdAsset.Generate(ctx, nil); err != nil {
+        return nil, err
+    }
+    assets = append(assets, containerdAsset)
+    
+    return assets, nil
+}
+
+func (c *CentOSProvider) GenerateBootstrapScript(ctx context.Context, config *provider.InstallConfig, role string) ([]byte, error) {
+    script := c.generateCommonScript(config)
+    
+    switch role {
+    case "master":
+        script += c.generateMasterScript(config)
+    case "worker":
+        script += c.generateWorkerScript(config)
+    }
+    
+    return []byte(script), nil
+}
+
+func (c *CentOSProvider) generateCommonScript(config *provider.InstallConfig) string {
+    return `#!/bin/bash
+set -euo pipefail
+
+CENTOS_COMMON_SCRIPT
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
+
+configure_system() {
+    log "Configuring system parameters..."
+    
+    cat > /etc/sysctl.d/99-kubernetes.conf <<EOF
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+EOF
+    
+    sysctl --system
+}
+
+configure_modules() {
+    log "Configuring kernel modules..."
+    
+    cat > /etc/modules-load.d/k8s.conf <<EOF
+overlay
+br_netfilter
+EOF
+    
+    modprobe overlay
+    modprobe br_netfilter
+}
+
+disable_swap() {
+    log "Disabling swap..."
+    swapoff -a
+    sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+}
+
+disable_selinux() {
+    log "Disabling SELinux..."
+    setenforce 0
+    sed -i 's/^SELINUX=enforcing$/SELINUX=disabled/' /etc/selinux/config
+}
+
+install_dependencies() {
+    log "Installing dependencies..."
+    
+    yum install -y \
+        yum-utils \
+        device-mapper-persistent-data \
+        lvm2 \
+        conntrack \
+        ipvsadm \
+        ipset \
+        jq \
+        socat
+}
+
+install_containerd() {
+    log "Installing containerd..."
+    
+    yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+    yum install -y containerd
+}
+
+configure_containerd() {
+    log "Configuring containerd..."
+    
+    mkdir -p /etc/containerd
+    containerd config default > /etc/containerd/config.toml
+    sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+    systemctl restart containerd
+}
+
+install_kubernetes() {
+    local version=$1
+    
+    log "Installing Kubernetes $version..."
+    
+    cat <<EOF > /etc/yum.repos.d/kubernetes.repo
+[kubernetes]
+name=Kubernetes
+baseurl=https://pkgs.k8s.io/core:/stable:/${version}/rpm/
+enabled=1
+gpgcheck=1
+gpgkey=https://pkgs.k8s.io/core:/stable:/${version}/rpm/repodata/repomd.xml.key
+EOF
+    
+    yum install -y kubelet kubeadm kubectl
+    systemctl enable kubelet
+}
+
+# 执行通用配置
+configure_system
+configure_modules
+disable_swap
+disable_selinux
+install_dependencies
+install_containerd
+configure_containerd
+install_kubernetes ` + config.Spec.KubernetesVersion + `
+`
+}
+
+func (c *CentOSProvider) GetPackageList() []string {
+    return []string{
+        "yum-utils",
+        "device-mapper-persistent-data",
+        "lvm2",
+        "conntrack",
+        "ipvsadm",
+        "ipset",
+        "jq",
+        "socat",
+        "containerd",
+        "kubelet",
+        "kubeadm",
+        "kubectl",
+    }
+}
+
+func (c *CentOSProvider) GetSystemServiceNames() map[string]string {
+    return map[string]string{
+        "containerd": "containerd",
+        "kubelet":    "kubelet",
+    }
+}
+
+func (c *CentOSProvider) Validate(ctx context.Context, node *provider.NodeInfo) error {
+    executor, err := executor.NewSSHExecutor(
+        node.IP,
+        22,
+        node.SSHUser,
+        []byte(node.SSHKey),
+    )
+    if err != nil {
+        return err
+    }
+    defer executor.Close()
+    
+    output, err := executor.Execute("cat /etc/os-release")
+    if err != nil {
+        return err
+    }
+    
+    if !strings.Contains(strings.ToLower(output), "centos") && 
+       !strings.Contains(strings.ToLower(output), "rhel") {
+        return fmt.Errorf("node %s is not running CentOS/RHEL", node.Hostname)
+    }
+    
+    return nil
+}
+```
+#### 3.3 RHCOS Provider实现（支持Ignition）
+```go
+// pkg/provider/os/rhcos/provider.go
+package rhcos
+
+import (
+    "context"
+    "fmt"
+    
+    "github.com/bocloud/bke/pkg/asset"
+    "github.com/bocloud/bke/pkg/provider"
+    igntypes "github.com/coreos/ignition/v2/config/v3_4/types"
+)
+
+// RHCOSProvider Red Hat CoreOS操作系统提供者
+type RHCOSProvider struct {
+    version string
+}
+
+func NewRHCOSProvider(version string) *RHCOSProvider {
+    return &RHCOSProvider{
+        version: version,
+    }
+}
+
+func (r *RHCOSProvider) Name() string {
+    return "rhcos"
+}
+
+func (r *RHCOSProvider) Type() provider.OSType {
+    return provider.OSTypeRHCOS
+}
+
+func (r *RHCOSProvider) GenerateOSAssets(ctx context.Context, config *provider.InstallConfig) ([]asset.WritableAsset, error) {
+    assets := []asset.WritableAsset{}
+    
+    // 生成Ignition配置资产
+    ignitionAsset := &IgnitionConfigAsset{Config: config}
+    if err := ignitionAsset.Generate(ctx, nil); err != nil {
+        return nil, err
+    }
+    assets = append(assets, ignitionAsset)
+    
+    return assets, nil
+}
+
+func (r *RHCOSProvider) GenerateBootstrapScript(ctx context.Context, config *provider.InstallConfig, role string) ([]byte, error) {
+    // RHCOS使用Ignition，不使用Shell脚本
+    return nil, fmt.Errorf("RHCOS uses Ignition, not shell scripts")
+}
+
+func (r *RHCOSProvider) GenerateIgnitionConfig(ctx context.Context, config *provider.InstallConfig, role string) (*igntypes.Config, error) {
+    ignition := &igntypes.Config{
+        Ignition: igntypes.Ignition{
+            Version: igntypes.MaxVersion.String(),
+        },
+    }
+    
+    // 添加文件
+    r.addFiles(ignition, config, role)
+    
+    // 添加Systemd服务
+    r.addSystemdUnits(ignition, config, role)
+    
+    return ignition, nil
+}
+
+func (r *RHCOSProvider) addFiles(ignition *igntypes.Config, config *provider.InstallConfig, role string) {
+    // 添加证书文件
+    ignition.Storage.Files = append(ignition.Storage.Files,
+        igntypes.File{
+            Path: "/etc/kubernetes/pki/ca.crt",
+            Contents: igntypes.Resource{
+                Source: ignutil.StrToPtr(
+                    dataurl.EncodeBytes([]byte(config.Certificates.RootCA.Cert)),
+                ),
+            },
+            Mode: ignutil.IntToPtr(0644),
+        },
+    )
+    
+    // 添加kubeconfig文件
+    // ...
+}
+
+func (r *RHCOSProvider) addSystemdUnits(ignition *igntypes.Config, config *provider.InstallConfig, role string) {
+    // 添加kubelet服务
+    ignition.Systemd.Units = append(ignition.Systemd.Units,
+        igntypes.Unit{
+            Name:    "kubelet.service",
+            Enabled: ignutil.BoolToPtr(true),
+            Contents: ignutil.StrToPtr(`
+[Unit]
+Description=Kubernetes Kubelet
+After=containerd.service
+Requires=containerd.service
+
+[Service]
+ExecStart=/usr/bin/kubelet
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+`),
+        },
+    )
+}
+
+func (r *RHCOSProvider) GetPackageList() []string {
+    // RHCOS是原子系统，不需要安装包
+    return []string{}
+}
+
+func (r *RHCOSProvider) GetSystemServiceNames() map[string]string {
+    return map[string]string{
+        "containerd": "containerd",
+        "kubelet":    "kubelet",
+    }
+}
+
+func (r *RHCOSProvider) Validate(ctx context.Context, node *provider.NodeInfo) error {
+    // RHCOS节点验证
+    return nil
+}
+
+// IgnitionConfigAsset Ignition配置资产
+type IgnitionConfigAsset struct {
+    Config *provider.InstallConfig
+    Files  []*asset.File
+}
+
+func (i *IgnitionConfigAsset) Dependencies() []asset.Asset {
+    return nil
+}
+
+func (i *IgnitionConfigAsset) Generate(ctx context.Context, parents asset.Parents) error {
+    // 生成Ignition配置
+    return nil
+}
+```
+### 四、Provider Factory实现
+```go
+// pkg/provider/factory.go
+package provider
+
+import (
+    "fmt"
+    "sync"
+    
+    "github.com/bocloud/bke/pkg/provider/infrastructure/ipi"
+    "github.com/bocloud/bke/pkg/provider/infrastructure/upi"
+    "github.com/bocloud/bke/pkg/provider/os/centos"
+    "github.com/bocloud/bke/pkg/provider/os/rhcos"
+    "github.com/bocloud/bke/pkg/provider/os/ubuntu"
+)
+
+// ProviderFactoryImpl 提供者工厂实现
+type ProviderFactoryImpl struct {
+    infrastructureProviders map[string]InfrastructureProvider
+    bootstrapProviders      map[string]BootstrapProvider
+    osProviders             map[OSType]OSProvider
+    mu                      sync.RWMutex
+}
+
+func NewProviderFactory() *ProviderFactoryImpl {
+    factory := &ProviderFactoryImpl{
+        infrastructureProviders: make(map[string]InfrastructureProvider),
+        bootstrapProviders:      make(map[string]BootstrapProvider),
+        osProviders:             make(map[OSType]OSProvider),
+    }
+    
+    // 注册默认提供者
+    factory.registerDefaultProviders()
+    
+    return factory
+}
+
+func (f *ProviderFactoryImpl) registerDefaultProviders() {
+    // 注册操作系统提供者
+    f.RegisterOSProvider(ubuntu.NewUbuntuProvider(""))
+    f.RegisterOSProvider(centos.NewCentOSProvider(""))
+    f.RegisterOSProvider(rhcos.NewRHCOSProvider(""))
+    
+    // 注册基础设施提供者
+    f.RegisterInfrastructureProvider(upi.NewUPIProvider(nil))
+    f.RegisterInfrastructureProvider(ipi.NewIPIProvider("vsphere", nil))
+    f.RegisterInfrastructureProvider(ipi.NewIPIProvider("openstack", nil))
+    f.RegisterInfrastructureProvider(ipi.NewIPIProvider("baremetal", nil))
+}
+
+func (f *ProviderFactoryImpl) GetInfrastructureProvider(providerType ProviderType, platform string) (InfrastructureProvider, error) {
+    f.mu.RLock()
+    defer f.mu.RUnlock()
+    
+    key := fmt.Sprintf("%s-%s", providerType, platform)
+    provider, exists := f.infrastructureProviders[key]
+    if !exists {
+        return nil, fmt.Errorf("infrastructure provider not found: %s", key)
+    }
+    
+    return provider, nil
+}
+
+func (f *ProviderFactoryImpl) GetBootstrapProvider(bootstrapType string) (BootstrapProvider, error) {
+    f.mu.RLock()
+    defer f.mu.RUnlock()
+    
+    provider, exists := f.bootstrapProviders[bootstrapType]
+    if !exists {
+        return nil, fmt.Errorf("bootstrap provider not found: %s", bootstrapType)
+    }
+    
+    return provider, nil
+}
+
+func (f *ProviderFactoryImpl) GetOSProvider(osType OSType) (OSProvider, error) {
+    f.mu.RLock()
+    defer f.mu.RUnlock()
+    
+    provider, exists := f.osProviders[osType]
+    if !exists {
+        return nil, fmt.Errorf("OS provider not found: %s", osType)
+    }
+    
+    return provider, nil
+}
+
+func (f *ProviderFactoryImpl) RegisterInfrastructureProvider(provider InfrastructureProvider) error {
+    f.mu.Lock()
+    defer f.mu.Unlock()
+    
+    key := fmt.Sprintf("%s-%s", provider.Type(), provider.Name())
+    f.infrastructureProviders[key] = provider
+    
+    return nil
+}
+
+func (f *ProviderFactoryImpl) RegisterBootstrapProvider(provider BootstrapProvider) error {
+    f.mu.Lock()
+    defer f.mu.Unlock()
+    
+    f.bootstrapProviders[provider.Name()] = provider
+    
+    return nil
+}
+
+func (f *ProviderFactoryImpl) RegisterOSProvider(provider OSProvider) error {
+    f.mu.Lock()
+    defer f.mu.Unlock()
+    
+    f.osProviders[provider.Type()] = provider
+    
+    return nil
+}
+```
+### 五、安装流程实现
+```go
+// pkg/installer/installer.go
+package installer
+
+import (
+    "context"
+    "fmt"
+    
+    "github.com/bocloud/bke/pkg/asset"
+    "github.com/bocloud/bke/pkg/provider"
+    "github.com/bocloud/bke/pkg/state"
+)
+
+// Installer 安装器
+type Installer struct {
+    config          *provider.InstallConfig
+    providerFactory provider.ProviderFactory
+    assetStore      *asset.Store
+    stateManager    *state.Manager
+    
+    infraProvider   provider.InfrastructureProvider
+    bootstrapProvider provider.BootstrapProvider
+    osProvider      provider.OSProvider
+}
+
+func NewInstaller(config *provider.InstallConfig) (*Installer, error) {
+    installer := &Installer{
+        config:          config,
+        providerFactory: provider.NewProviderFactory(),
+        assetStore:      asset.NewStore(config.InstallDir),
+        stateManager:    state.NewManager(config.InstallDir),
+    }
+    
+    // 初始化提供者
+    if err := installer.initProviders(); err != nil {
+        return nil, err
+    }
+    
+    return installer, nil
+}
+
+func (i *Installer) initProviders() error {
+    var err error
+    
+    // 1. 获取操作系统提供者
+    i.osProvider, err = i.providerFactory.GetOSProvider(i.config.Spec.OS.Type)
+    if err != nil {
+        return fmt.Errorf("failed to get OS provider: %v", err)
+    }
+    
+    // 2. 获取基础设施提供者
+    providerType := i.getProviderType()
+    i.infraProvider, err = i.providerFactory.GetInfrastructureProvider(
+        providerType,
+        i.config.Spec.Platform.Type,
+    )
+    if err != nil {
+        return fmt.Errorf("failed to get infrastructure provider: %v", err)
+    }
+    
+    // 3. 获取引导提供者
+    i.bootstrapProvider, err = i.providerFactory.GetBootstrapProvider("kubeadm")
+    if err != nil {
+        return fmt.Errorf("failed to get bootstrap provider: %v", err)
+    }
+    
+    return nil
+}
+
+func (i *Installer) getProviderType() provider.ProviderType {
+    if i.config.Spec.Platform.UserProvidedInfrastructure {
+        return provider.ProviderTypeUPI
+    }
+    return provider.ProviderTypeIPI
+}
+
+func (i *Installer) Install(ctx context.Context) error {
+    // 阶段1: 验证配置
+    log.Info("Phase 1: Validating configuration...")
+    if err := i.validate(ctx); err != nil {
+        return fmt.Errorf("phase 1 failed: %v", err)
+    }
+    i.saveProgress("validate", 100)
+    
+    // 阶段2: 预检查
+    log.Info("Phase 2: Running preflight checks...")
+    if err := i.preflight(ctx); err != nil {
+        return fmt.Errorf("phase 2 failed: %v", err)
+    }
+    i.saveProgress("preflight", 100)
+    
+    // 阶段3: 生成配置资产
+    log.Info("Phase 3: Generating configuration assets...")
+    if err := i.generateConfigAssets(ctx); err != nil {
+        return fmt.Errorf("phase 3 failed: %v", err)
+    }
+    i.saveProgress("config", 100)
+    
+    // 阶段4: 生成证书资产
+    log.Info("Phase 4: Generating certificate assets...")
+    if err := i.generateCertificateAssets(ctx); err != nil {
+        return fmt.Errorf("phase 4 failed: %v", err)
+    }
+    i.saveProgress("certificates", 100)
+    
+    // 阶段5: 生成操作系统资产
+    log.Info("Phase 5: Generating OS assets...")
+    if err := i.generateOSAssets(ctx); err != nil {
+        return fmt.Errorf("phase 5 failed: %v", err)
+    }
+    i.saveProgress("os", 100)
+    
+    // 阶段6: 生成基础设施资产
+    log.Info("Phase 6: Generating infrastructure assets...")
+    if err := i.generateInfrastructureAssets(ctx); err != nil {
+        return fmt.Errorf("phase 6 failed: %v", err)
+    }
+    i.saveProgress("infrastructure", 100)
+    
+    // 阶段7: 生成引导资产
+    log.Info("Phase 7: Generating bootstrap assets...")
+    if err := i.generateBootstrapAssets(ctx); err != nil {
+        return fmt.Errorf("phase 7 failed: %v", err)
+    }
+    i.saveProgress("bootstrap", 100)
+    
+    // 阶段8: 生成Cluster API资源
+    log.Info("Phase 8: Generating Cluster API resources...")
+    if err := i.generateClusterAPIResources(ctx); err != nil {
+        return fmt.Errorf("phase 8 failed: %v", err)
+    }
+    i.saveProgress("cluster-api", 100)
+    
+    // 阶段9: 应用Cluster API资源
+    log.Info("Phase 9: Applying Cluster API resources...")
+    if err := i.applyClusterAPIResources(ctx); err != nil {
+        return fmt.Errorf("phase 9 failed: %v", err)
+    }
+    i.saveProgress("apply", 100)
+    
+    // 阶段10: 等待集群就绪
+    log.Info("Phase 10: Waiting for cluster to be ready...")
+    if err := i.waitForClusterReady(ctx); err != nil {
+        return fmt.Errorf("phase 10 failed: %v", err)
+    }
+    i.saveProgress("cluster-ready", 100)
+    
+    // 阶段11: 安装后处理
+    log.Info("Phase 11: Running post-install tasks...")
+    if err := i.postInstall(ctx); err != nil {
+        return fmt.Errorf("phase 11 failed: %v", err)
+    }
+    i.saveProgress("post-install", 100)
+    
+    log.Info("Installation completed successfully!")
+    i.printSuccessMessage()
+    
+    return nil
+}
+
+func (i *Installer) validate(ctx context.Context) error {
+    // 1. 验证配置
+    if err := i.infraProvider.Validate(i.config); err != nil {
+        return err
+    }
+    
+    if err := i.bootstrapProvider.Validate(i.config); err != nil {
+        return err
+    }
+    
+    return nil
+}
+
+func (i *Installer) preflight(ctx context.Context) error {
+    // 执行预检查
+    return i.infraProvider.Preflight(ctx, i.config)
+}
+
+func (i *Installer) generateOSAssets(ctx context.Context) error {
+    assets, err := i.osProvider.GenerateOSAssets(ctx, i.config)
+    if err != nil {
+        return err
+    }
+    
+    for _, a := range assets {
+        if err := i.assetStore.Store(ctx, a); err != nil {
+            return err
+        }
+    }
+    
+    return nil
+}
+
+func (i *Installer) generateInfrastructureAssets(ctx context.Context) error {
+    // 1. 生成集群资产
+    clusterAssets, err := i.infraProvider.GenerateClusterAssets(ctx, i.config)
+    if err != nil {
+        return err
+    }
+    
+    for _, a := range clusterAssets {
+        if err := i.assetStore.Store(ctx, a); err != nil {
+            return err
+        }
+    }
+    
+    // 2. 生成机器资产
+    for _, role := range []string{"master", "worker"} {
+        machineAssets, err := i.infraProvider.GenerateMachineAssets(ctx, i.config, role)
+        if err != nil {
+            return err
+        }
+        
+        for _, a := range machineAssets {
+            if err := i.assetStore.Store(ctx, a); err != nil {
+                return err
+            }
+        }
+    }
+    
+    return nil
+}
+
+func (i *Installer) generateBootstrapAssets(ctx context.Context) error {
+    for _, role := range []string{"master", "worker"} {
+        assets, err := i.bootstrapProvider.GenerateBootstrapAssets(ctx, i.config, role)
+        if err != nil {
+            return err
+        }
+        
+        for _, a := range assets {
+            if err := i.assetStore.Store(ctx, a); err != nil {
+                return err
+            }
+        }
+    }
+    
+    return nil
+}
+
+func (i *Installer) postInstall(ctx context.Context) error {
+    return i.infraProvider.PostInstall(ctx, i.config)
+}
+```
+### 六、配置文件示例
+#### 6.1 UPI Ubuntu配置
+```yaml
+apiVersion: bke.bocloud.com/v1beta1
+kind: BKECluster
+metadata:
+  name: my-cluster
+spec:
+  # 操作系统配置
+  os:
+    type: ubuntu
+    version: "22.04"
+  
+  # 平台配置
+  platform:
+    type: baremetal
+    userProvidedInfrastructure: true  # UPI场景
+    userProvidedDNS: true
+    userProvidedLB: true
+    dnsServers:
+      - 192.168.1.10
+  
+  # 网络配置
+  networking:
+    dnsDomain: cluster.local
+    podSubnet: 10.244.0.0/16
+    serviceSubnet: 10.96.0.0/12
+  
+  # 控制平面端点
+  controlPlaneEndpoint: 192.168.1.100:6443
+  
+  # Kubernetes版本
+  kubernetesVersion: v1.28.8
+  
+  # 镜像仓库
+  imageRepo:
+    domain: registry.example.com
+    namespace: kubernetes
+  
+  # 节点配置
+  nodes:
+    - hostname: master-0
+      ip: 192.168.1.100
+      roles:
+        - master
+        - etcd
+      sshUser: root
+      sshKeyFile: /root/.ssh/id_rsa
+```
+#### 6.2 IPI vSphere配置
+```yaml
+apiVersion: bke.bocloud.com/v1beta1
+kind: BKECluster
+metadata:
+  name: my-cluster
+spec:
+  # 操作系统配置
+  os:
+    type: rhcos
+    version: "4.14"
+  
+  # 平台配置
+  platform:
+    type: vsphere
+    userProvidedInfrastructure: false  # IPI场景
+    userProvidedDNS: false
+    userProvidedLB: false
+    vsphere:
+      vcenter: vcenter.example.com
+      username: administrator@vsphere.local
+      password: password
+      datacenter: Datacenter
+      datastore: Datastore
+      network: VM Network
+      resourcePool: Resources
+      folder: /Datacenter/vm/my-cluster
+  
+  # 网络配置
+  networking:
+    dnsDomain: cluster.local
+    podSubnet: 10.244.0.0/16
+    serviceSubnet: 10.96.0.0/12
+  
+  # 控制平面配置
+  controlPlane:
+    replicas: 3
+    machineType: master
+    hardware:
+      cpus: 4
+      memory: 16384
+      diskSize: 120
+  
+  # Worker配置
+  workers:
+    - name: worker-group-1
+      replicas: 3
+      machineType: worker
+      hardware:
+        cpus: 8
+        memory: 32768
+        diskSize: 200
+  
+  # Kubernetes版本
+  kubernetesVersion: v1.28.8
+  
+  # 镜像仓库
+  imageRepo:
+    domain: registry.example.com
+    namespace: kubernetes
+```
+#### 6.3 UPI CentOS配置
+```yaml
+apiVersion: bke.bocloud.com/v1beta1
+kind: BKECluster
+metadata:
+  name: my-cluster
+spec:
+  # 操作系统配置
+  os:
+    type: centos
+    version: "8"
+  
+  # 平台配置
+  platform:
+    type: baremetal
+    userProvidedInfrastructure: true
+    userProvidedDNS: true
+    userProvidedLB: true
+  
+  # 其他配置同上
+  # ...
+```
+### 七、命令行接口
+```bash
+# UPI Ubuntu安装
+bkeadm install --config install-config-upi-ubuntu.yaml
+
+# IPI vSphere RHCOS安装
+bkeadm install --config install-config-ipi-vsphere-rhcos.yaml
+
+# UPI CentOS安装
+bkeadm install --config install-config-upi-centos.yaml
+
+# 列出支持的操作系统
+bkeadm list os
+
+# 列出支持的平台
+bkeadm list platform
+
+# 验证配置
+bkeadm validate --config install-config.yaml
+
+# 预检查
+bkeadm preflight --config install-config.yaml
+```
+### 八、插件扩展机制
+#### 8.1 自定义Provider插件
+```go
+// pkg/plugin/provider_plugin.go
+package plugin
+
+import (
+    "github.com/bocloud/bke/pkg/provider"
+    "github.com/hashicorp/go-plugin"
+)
+
+// ProviderPlugin Provider插件
+type ProviderPlugin struct {
+    plugin.Plugin
+    Provider provider.InfrastructureProvider
+}
+
+func (p *ProviderPlugin) Server(broker *plugin.MuxBroker) (interface{}, error) {
+    return &ProviderServer{Provider: p.Provider}, nil
+}
+
+func (p *ProviderPlugin) Client(broker *plugin.MuxBroker, client *plugin.Client) (interface{}, error) {
+    return &ProviderClient{Client: client}, nil
+}
+
+// ProviderServer Provider服务端
+type ProviderServer struct {
+    Provider provider.InfrastructureProvider
+}
+
+// ProviderClient Provider客户端
+type ProviderClient struct {
+    Client *plugin.Client
+}
+
+// 加载插件
+func LoadProviderPlugin(pluginPath string) (provider.InfrastructureProvider, error) {
+    client := plugin.NewClient(&plugin.ClientConfig{
+        HandshakeConfig: plugin.HandshakeConfig{
+            ProtocolVersion:  1,
+            MagicCookieKey:   "BKE_PROVIDER",
+            MagicCookieValue: "bke_provider",
+        },
+        Plugins: map[string]plugin.Plugin{
+            "provider": &ProviderPlugin{},
+        },
+        Cmd: exec.Command(pluginPath),
+    })
+    
+    rpcClient, err := client.Client()
+    if err != nil {
+        return nil, err
+    }
+    
+    raw, err := rpcClient.Dispense("provider")
+    if err != nil {
+        return nil, err
+    }
+    
+    return raw.(provider.InfrastructureProvider), nil
+}
+```
+### 九、关键优势
+1. **多场景支持**：统一框架支持UPI和IPI场景
+2. **多操作系统**：支持Ubuntu、CentOS、RHCOS等多种操作系统
+3. **可扩展性**：插件化架构，易于添加新的Provider
+4. **标准化接口**：遵循Cluster API标准接口
+5. **声明式管理**：使用Cluster API的声明式方式管理集群
+6. **自动化运维**：自动处理节点扩缩容、升级、故障恢复
+7. **灵活配置**：支持不同场景的配置组合
+
+这个可扩展框架方案完美支持UPI/IPI场景和多种操作系统，同时保持了Asset-Based架构和Cluster API的优势，是一个高度灵活和可扩展的Kubernetes集群安装解决方案。
+
+       
+# 基于CVO（Cluster Version Operator）对核心组件自动化升级的要求，优化可扩展框架方案
+## openFuyao 可扩展安装框架方案（支持CVO自动化升级）
+### 一、CVO架构设计
+#### 1.1 CVO总体架构
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  Cluster Version Operator                    │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │           ClusterVersion Controller                   │  │
+│  │  ┌────────────┐  ┌────────────┐  ┌────────────┐    │  │
+│  │  │ Version    │  │ Upgrade    │  │ Condition  │    │  │
+│  │  │ Manager    │  │ Orchestrator│ │ Manager    │    │  │
+│  │  └────────────┘  └────────────┘  └────────────┘    │  │
+│  └──────────────────────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │         ClusterOperator Controllers                   │  │
+│  │  ┌────────────┐  ┌────────────┐  ┌────────────┐    │  │
+│  │  │ Etcd       │  │ API Server │  │ Scheduler  │    │  │
+│  │  │ Operator   │  │ Operator   │  │ Operator   │    │  │
+│  │  └────────────┘  └────────────┘  └────────────┘    │  │
+│  └──────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────────┐
+│              Component Manifest Management                   │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │              Release Manifest System                  │  │
+│  │  ┌────────────┐  ┌────────────┐  ┌────────────┐    │  │
+│  │  │ Image      │  │ Manifest   │  │ Version    │    │  │
+│  │  │ Stream     │  │ Generator  │  │ Resolver   │    │  │
+│  │  └────────────┘  └────────────┘  └────────────┘    │  │
+│  └──────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+```
+#### 1.2 CVO核心CRD定义
+```go
+// api/v1/clusterversion_types.go
+package v1
+
+import (
+    metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// ClusterVersion 集群版本资源
+type ClusterVersion struct {
+    metav1.TypeMeta   `json:",inline"`
+    metav1.ObjectMeta `json:"metadata,omitempty"`
+    
+    Spec   ClusterVersionSpec   `json:"spec,omitempty"`
+    Status ClusterVersionStatus `json:"status,omitempty"`
+}
+
+type ClusterVersionSpec struct {
+    // 集群ID
+    ClusterID string `json:"clusterID"`
+    
+    // 当前版本
+    DesiredVersion Version `json:"desiredVersion"`
+    
+    // 升级通道
+    Channel string `json:"channel,omitempty"`
+    
+    // 上游更新源
+    Upstream string `json:"upstream,omitempty"`
+    
+    // 升级配置
+    UpgradeConfig UpgradeConfig `json:"upgradeConfig,omitempty"`
+    
+    // 集群版本架构
+    Architecture string `json:"architecture,omitempty"`
+}
+
+type ClusterVersionStatus struct {
+    // 当前版本
+    VersionHistory []VersionHistory `json:"versionHistory,omitempty"`
+    
+    // 条件
+    Conditions []ClusterVersionCondition `json:"conditions,omitempty"`
+    
+    // 可用更新
+    AvailableUpdates []Update `json:"availableUpdates,omitempty"`
+    
+    // 升级状态
+    UpgradeState UpgradeState `json:"upgradeState,omitempty"`
+    
+    // 最后检查时间
+    LastUpdateTime metav1.Time `json:"lastUpdateTime,omitempty"`
+}
+
+type Version struct {
+    // 版本号
+    Version string `json:"version"`
+    
+    // 镜像摘要
+    Image string `json:"image"`
+    
+    // Git提交
+    GitCommit string `json:"gitCommit,omitempty"`
+    
+    // 构建时间
+    BuildTime string `json:"buildTime,omitempty"`
+}
+
+type VersionHistory struct {
+    // 版本
+    Version string `json:"version"`
+    
+    // 镜像
+    Image string `json:"image"`
+    
+    // 开始时间
+    StartedTime metav1.Time `json:"startedTime"`
+    
+    // 完成时间
+    CompletionTime *metav1.Time `json:"completionTime,omitempty"`
+    
+    // 状态
+    State VersionState `json:"state"`
+    
+    // 是否当前版本
+    Current bool `json:"current"`
+}
+
+type UpgradeConfig struct {
+    // 升级策略
+    Strategy UpgradeStrategy `json:"strategy,omitempty"`
+    
+    // 升级窗口
+    UpgradeWindow *UpgradeWindow `json:"upgradeWindow,omitempty"`
+    
+    // 最大不可用
+    MaxUnavailable int `json:"maxUnavailable,omitempty"`
+    
+    // 强制升级
+    Force bool `json:"force,omitempty"`
+}
+
+type UpgradeStrategy string
+
+const (
+    UpgradeStrategyAuto    UpgradeStrategy = "Auto"
+    UpgradeStrategyManual  UpgradeStrategy = "Manual"
+    UpgradeStrategyForced  UpgradeStrategy = "Forced"
+)
+
+type UpgradeWindow struct {
+    // 开始时间
+    Start string `json:"start"`
+    
+    // 持续时间
+    Duration string `json:"duration"`
+    
+    // 时区
+    Timezone string `json:"timezone,omitempty"`
+}
+
+type UpgradeState string
+
+const (
+    UpgradeStateIdle       UpgradeState = "Idle"
+    UpgradeStateUpdating   UpgradeState = "Updating"
+    UpgradeStatePaused     UpgradeState = "Paused"
+    UpgradeStateFailed     UpgradeState = "Failed"
+    UpgradeStateCompleted  UpgradeState = "Completed"
+)
+
+type VersionState string
+
+const (
+    VersionStateCompleted  VersionState = "Completed"
+    VersionStatePartial    VersionState = "Partial"
+    VersionStateFailed     VersionState = "Failed"
+)
+
+type Update struct {
+    Version Version `json:"version"`
+    
+    // 是否推荐
+    Recommended bool `json:"recommended"`
+    
+    // 更新类型
+    Type UpdateType `json:"type"`
+    
+    // 更新描述
+    Description string `json:"description,omitempty"`
+}
+
+type UpdateType string
+
+const (
+    UpdateTypeSecurity UpdateType = "Security"
+    UpdateTypeBugfix   UpdateType = "Bugfix"
+    UpdateTypeFeature  UpdateType = "Feature"
+)
+
+type ClusterVersionCondition struct {
+    Type ClusterVersionConditionType `json:"type"`
+    
+    Status corev1.ConditionStatus `json:"status"`
+    
+    LastTransitionTime metav1.Time `json:"lastTransitionTime,omitempty"`
+    
+    Reason string `json:"reason,omitempty"`
+    
+    Message string `json:"message,omitempty"`
+}
+
+type ClusterVersionConditionType string
+
+const (
+    ClusterVersionConditionAvailable    ClusterVersionConditionType = "Available"
+    ClusterVersionConditionProgressing  ClusterVersionConditionType = "Progressing"
+    ClusterVersionConditionFailing      ClusterVersionConditionType = "Failing"
+    ClusterVersionConditionUpgradeable  ClusterVersionConditionType = "Upgradeable"
+)
+
+// ClusterOperator 集群操作员资源
+type ClusterOperator struct {
+    metav1.TypeMeta   `json:",inline"`
+    metav1.ObjectMeta `json:"metadata,omitempty"`
+    
+    Status ClusterOperatorStatus `json:"status,omitempty"`
+}
+
+type ClusterOperatorStatus struct {
+    // 条件
+    Conditions []ClusterOperatorCondition `json:"conditions,omitempty"`
+    
+    // 版本
+    Versions []OperatorVersion `json:"versions,omitempty"`
+    
+    // 相关对象
+    RelatedObjects []ObjectReference `json:"relatedObjects,omitempty"`
+    
+    // 扩展
+    Extension *runtime.RawExtension `json:"extension,omitempty"`
+}
+
+type ClusterOperatorCondition struct {
+    Type ClusterOperatorConditionType `json:"type"`
+    
+    Status corev1.ConditionStatus `json:"status"`
+    
+    LastTransitionTime metav1.Time `json:"lastTransitionTime,omitempty"`
+    
+    Reason string `json:"reason,omitempty"`
+    
+    Message string `json:"message,omitempty"`
+}
+
+type ClusterOperatorConditionType string
+
+const (
+    ClusterOperatorConditionAvailable    ClusterOperatorConditionType = "Available"
+    ClusterOperatorConditionProgressing  ClusterOperatorConditionType = "Progressing"
+    ClusterOperatorConditionDegraded     ClusterOperatorConditionType = "Degraded"
+    ClusterOperatorConditionUpgradeable  ClusterOperatorConditionType = "Upgradeable"
+)
+
+type OperatorVersion struct {
+    Name    string `json:"name"`
+    Version string `json:"version"`
+}
+
+type ObjectReference struct {
+    Group     string `json:"group"`
+    Resource  string `json:"resource"`
+    Namespace string `json:"namespace,omitempty"`
+    Name      string `json:"name"`
+}
+```
+### 二、CVO核心实现
+#### 2.1 ClusterVersion Controller
+```go
+// controllers/clusterversion_controller.go
+package controllers
+
+import (
+    "context"
+    "fmt"
+    "time"
+    
+    "github.com/go-logr/logr"
+    "k8s.io/apimachinery/pkg/runtime"
+    "k8s.io/client-go/tools/record"
+    ctrl "sigs.k8s.io/controller-runtime"
+    "sigs.k8s.io/controller-runtime/pkg/client"
+    
+    bkev1 "github.com/bocloud/bke/api/v1"
+    "github.com/bocloud/bke/pkg/cvo/upgrade"
+    "github.com/bocloud/bke/pkg/cvo/version"
+    "github.com/bocloud/bke/pkg/cvo/manifest"
+)
+
+// ClusterVersionReconciler reconciles a ClusterVersion object
+type ClusterVersionReconciler struct {
+    client.Client
+    Log               logr.Logger
+    Scheme            *runtime.Scheme
+    Recorder          record.EventRecorder
+    VersionManager    *version.Manager
+    UpgradeOrchestrator *upgrade.Orchestrator
+    ManifestGenerator *manifest.Generator
+}
+
+func (r *ClusterVersionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+    log := r.Log.WithValues("clusterversion", req.NamespacedName)
+    
+    // 1. 获取ClusterVersion
+    clusterVersion := &bkev1.ClusterVersion{}
+    if err := r.Get(ctx, req.NamespacedName, clusterVersion); err != nil {
+        return ctrl.Result{}, client.IgnoreNotFound(err)
+    }
+    
+    // 2. 检查是否需要更新
+    if clusterVersion.Spec.DesiredVersion.Version == "" {
+        log.Info("No desired version specified")
+        return ctrl.Result{}, nil
+    }
+    
+    // 3. 获取当前版本
+    currentVersion := r.getCurrentVersion(clusterVersion)
+    
+    // 4. 检查是否需要升级
+    if currentVersion.Version == clusterVersion.Spec.DesiredVersion.Version {
+        log.Info("Already at desired version")
+        return ctrl.Result{}, nil
+    }
+    
+    // 5. 执行升级流程
+    result, err := r.upgradeCluster(ctx, log, clusterVersion, currentVersion)
+    if err != nil {
+        log.Error(err, "Failed to upgrade cluster")
+        return ctrl.Result{}, err
+    }
+    
+    return result, nil
+}
+
+func (r *ClusterVersionReconciler) upgradeCluster(
+    ctx context.Context,
+    log logr.Logger,
+    clusterVersion *bkev1.ClusterVersion,
+    currentVersion *bkev1.Version,
+) (ctrl.Result, error) {
+    // 1. 验证升级路径
+    if err := r.validateUpgradePath(currentVersion, &clusterVersion.Spec.DesiredVersion); err != nil {
+        r.setCondition(clusterVersion, bkev1.ClusterVersionConditionFailing, "InvalidUpgradePath", err.Error())
+        return ctrl.Result{}, err
+    }
+    
+    // 2. 检查升级条件
+    if !r.canUpgrade(ctx, clusterVersion) {
+        log.Info("Upgrade conditions not met, requeuing")
+        return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+    }
+    
+    // 3. 初始化升级状态
+    r.initializeUpgradeStatus(clusterVersion, currentVersion)
+    
+    // 4. 执行升级编排
+    upgradeState, err := r.UpgradeOrchestrator.Orchestrate(ctx, clusterVersion)
+    if err != nil {
+        r.setCondition(clusterVersion, bkev1.ClusterVersionConditionFailing, "UpgradeFailed", err.Error())
+        return ctrl.Result{}, err
+    }
+    
+    // 5. 更新状态
+    clusterVersion.Status.UpgradeState = upgradeState
+    
+    if upgradeState == bkev1.UpgradeStateCompleted {
+        r.setCondition(clusterVersion, bkev1.ClusterVersionConditionAvailable, "UpgradeCompleted", "Cluster upgraded successfully")
+        r.setCondition(clusterVersion, bkev1.ClusterVersionConditionProgressing, "UpgradeCompleted", "Cluster upgrade completed")
+        return ctrl.Result{}, nil
+    }
+    
+    if upgradeState == bkev1.UpgradeStateFailed {
+        r.setCondition(clusterVersion, bkev1.ClusterVersionConditionFailing, "UpgradeFailed", "Cluster upgrade failed")
+        return ctrl.Result{}, nil
+    }
+    
+    // 6. 继续升级过程
+    r.setCondition(clusterVersion, bkev1.ClusterVersionConditionProgressing, "UpgradeInProgress", "Cluster upgrade in progress")
+    return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+}
+
+func (r *ClusterVersionReconciler) validateUpgradePath(current, desired *bkev1.Version) error {
+    // 验证版本兼容性
+    return r.VersionManager.ValidateUpgradePath(current.Version, desired.Version)
+}
+
+func (r *ClusterVersionReconciler) canUpgrade(ctx context.Context, clusterVersion *bkev1.ClusterVersion) bool {
+    // 1. 检查所有ClusterOperator是否健康
+    operators := &bkev1.ClusterOperatorList{}
+    if err := r.List(ctx, operators); err != nil {
+        return false
+    }
+    
+    for _, operator := range operators.Items {
+        if !r.isOperatorHealthy(&operator) {
+            return false
+        }
+    }
+    
+    // 2. 检查升级窗口
+    if clusterVersion.Spec.UpgradeConfig.UpgradeWindow != nil {
+        if !r.isInUpgradeWindow(clusterVersion.Spec.UpgradeConfig.UpgradeWindow) {
+            return false
+        }
+    }
+    
+    // 3. 检查节点状态
+    if !r.areNodesHealthy(ctx) {
+        return false
+    }
+    
+    return true
+}
+
+func (r *ClusterVersionReconciler) isOperatorHealthy(operator *bkev1.ClusterOperator) bool {
+    for _, condition := range operator.Status.Conditions {
+        if condition.Type == bkev1.ClusterOperatorConditionAvailable && condition.Status != corev1.ConditionTrue {
+            return false
+        }
+        if condition.Type == bkev1.ClusterOperatorConditionDegraded && condition.Status == corev1.ConditionTrue {
+            return false
+        }
+    }
+    return true
+}
+
+func (r *ClusterVersionReconciler) isInUpgradeWindow(window *bkev1.UpgradeWindow) bool {
+    // 检查当前时间是否在升级窗口内
+    now := time.Now()
+    
+    // 解析窗口开始时间
+    start, err := time.Parse("15:04", window.Start)
+    if err != nil {
+        return false
+    }
+    
+    // 解析持续时间
+    duration, err := time.ParseDuration(window.Duration)
+    if err != nil {
+        return false
+    }
+    
+    // 计算窗口结束时间
+    end := start.Add(duration)
+    
+    // 检查当前时间
+    currentTime, _ := time.Parse("15:04", now.Format("15:04"))
+    
+    return currentTime.After(start) && currentTime.Before(end)
+}
+
+func (r *ClusterVersionReconciler) areNodesHealthy(ctx context.Context) bool {
+    nodes := &corev1.NodeList{}
+    if err := r.List(ctx, nodes); err != nil {
+        return false
+    }
+    
+    for _, node := range nodes.Items {
+        for _, condition := range node.Status.Conditions {
+            if condition.Type == corev1.NodeReady && condition.Status != corev1.ConditionTrue {
+                return false
+            }
+        }
+    }
+    
+    return true
+}
+
+func (r *ClusterVersionReconciler) getCurrentVersion(clusterVersion *bkev1.ClusterVersion) *bkev1.Version {
+    for _, history := range clusterVersion.Status.VersionHistory {
+        if history.Current {
+            return &bkev1.Version{
+                Version: history.Version,
+                Image:   history.Image,
+            }
+        }
+    }
+    return nil
+}
+
+func (r *ClusterVersionReconciler) initializeUpgradeStatus(clusterVersion *bkev1.ClusterVersion, currentVersion *bkev1.Version) {
+    // 添加新的版本历史记录
+    history := bkev1.VersionHistory{
+        Version:     clusterVersion.Spec.DesiredVersion.Version,
+        Image:       clusterVersion.Spec.DesiredVersion.Image,
+        StartedTime: metav1.Now(),
+        State:       bkev1.VersionStatePartial,
+        Current:     false,
+    }
+    
+    clusterVersion.Status.VersionHistory = append(clusterVersion.Status.VersionHistory, history)
+}
+
+func (r *ClusterVersionReconciler) setCondition(
+    clusterVersion *bkev1.ClusterVersion,
+    conditionType bkev1.ClusterVersionConditionType,
+    reason, message string,
+) {
+    now := metav1.Now()
+    
+    for i, condition := range clusterVersion.Status.Conditions {
+        if condition.Type == conditionType {
+            if condition.Status != corev1.ConditionTrue {
+                clusterVersion.Status.Conditions[i] = bkev1.ClusterVersionCondition{
+                    Type:               conditionType,
+                    Status:             corev1.ConditionTrue,
+                    LastTransitionTime: now,
+                    Reason:             reason,
+                    Message:            message,
+                }
+            }
+            return
+        }
+    }
+    
+    clusterVersion.Status.Conditions = append(clusterVersion.Status.Conditions, bkev1.ClusterVersionCondition{
+        Type:               conditionType,
+        Status:             corev1.ConditionTrue,
+        LastTransitionTime: now,
+        Reason:             reason,
+        Message:            message,
+    })
+}
+
+func (r *ClusterVersionReconciler) SetupWithManager(mgr ctrl.Manager) error {
+    return ctrl.NewControllerManagedBy(mgr).
+        For(&bkev1.ClusterVersion{}).
+        Owns(&bkev1.ClusterOperator{}).
+        Complete(r)
+}
+```
+
+#### 2.2 Upgrade Orchestrator
+
+```go
+// pkg/cvo/upgrade/orchestrator.go
+package upgrade
+
+import (
+    "context"
+    "fmt"
+    "sync"
+    
+    "github.com/go-logr/logr"
+    
+    bkev1 "github.com/bocloud/bke/api/v1"
+    "github.com/bocloud/bke/pkg/cvo/manifest"
+    "github.com/bocloud/bke/pkg/cvo/operator"
+)
+
+// Orchestrator 升级编排器
+type Orchestrator struct {
+    log               logr.Logger
+    manifestGenerator *manifest.Generator
+    operatorManager   *operator.Manager
+    upgradeSteps      []UpgradeStep
+    currentStep       int
+    mu                sync.Mutex
+}
+
+// UpgradeStep 升级步骤
+type UpgradeStep struct {
+    Name        string
+    Description string
+    Execute     func(ctx context.Context) error
+    Verify      func(ctx context.Context) (bool, error)
+    Rollback    func(ctx context.Context) error
+}
+
+func NewOrchestrator(log logr.Logger) *Orchestrator {
+    return &Orchestrator{
+        log:               log,
+        manifestGenerator: manifest.NewGenerator(),
+        operatorManager:   operator.NewManager(),
+        currentStep:       0,
+    }
+}
+
+func (o *Orchestrator) Orchestrate(ctx context.Context, clusterVersion *bkev1.ClusterVersion) (bkev1.UpgradeState, error) {
+    o.mu.Lock()
+    defer o.mu.Unlock()
+    
+    // 1. 初始化升级步骤
+    if o.upgradeSteps == nil {
+        o.initializeUpgradeSteps(clusterVersion)
+    }
+    
+    // 2. 执行升级步骤
+    for i := o.currentStep; i < len(o.upgradeSteps); i++ {
+        step := o.upgradeSteps[i]
+        
+        o.log.Info("Executing upgrade step", "step", step.Name, "description", step.Description)
+        
+        // 执行步骤
+        if err := step.Execute(ctx); err != nil {
+            o.log.Error(err, "Failed to execute upgrade step", "step", step.Name)
+            
+            // 尝试回滚
+            if step.Rollback != nil {
+                if rollbackErr := step.Rollback(ctx); rollbackErr != nil {
+                    o.log.Error(rollbackErr, "Failed to rollback upgrade step", "step", step.Name)
+                }
+            }
+            
+            return bkev1.UpgradeStateFailed, err
+        }
+        
+        // 验证步骤
+        completed, err := step.Verify(ctx)
+        if err != nil {
+            o.log.Error(err, "Failed to verify upgrade step", "step", step.Name)
+            return bkev1.UpgradeStateFailed, err
+        }
+        
+        if !completed {
+            o.log.Info("Upgrade step not completed, will retry", "step", step.Name)
+            return bkev1.UpgradeStateUpdating, nil
+        }
+        
+        o.log.Info("Upgrade step completed", "step", step.Name)
+        o.currentStep = i + 1
+    }
+    
+    // 3. 所有步骤完成
+    o.log.Info("All upgrade steps completed")
+    return bkev1.UpgradeStateCompleted, nil
+}
+
+func (o *Orchestrator) initializeUpgradeSteps(clusterVersion *bkev1.ClusterVersion) {
+    o.upgradeSteps = []UpgradeStep{
+        {
+            Name:        "preflight-checks",
+            Description: "Run preflight checks before upgrade",
+            Execute:     o.executePreflightChecks(clusterVersion),
+            Verify:      o.verifyPreflightChecks(clusterVersion),
+        },
+        {
+            Name:        "download-manifests",
+            Description: "Download and verify upgrade manifests",
+            Execute:     o.downloadManifests(clusterVersion),
+            Verify:      o.verifyManifests(clusterVersion),
+        },
+        {
+            Name:        "upgrade-control-plane",
+            Description: "Upgrade control plane components",
+            Execute:     o.upgradeControlPlane(clusterVersion),
+            Verify:      o.verifyControlPlane(clusterVersion),
+            Rollback:    o.rollbackControlPlane(clusterVersion),
+        },
+        {
+            Name:        "upgrade-workers",
+            Description: "Upgrade worker nodes",
+            Execute:     o.upgradeWorkers(clusterVersion),
+            Verify:      o.verifyWorkers(clusterVersion),
+            Rollback:    o.rollbackWorkers(clusterVersion),
+        },
+        {
+            Name:        "upgrade-addons",
+            Description: "Upgrade cluster addons",
+            Execute:     o.upgradeAddons(clusterVersion),
+            Verify:      o.verifyAddons(clusterVersion),
+        },
+        {
+            Name:        "post-upgrade",
+            Description: "Run post-upgrade tasks",
+            Execute:     o.executePostUpgrade(clusterVersion),
+            Verify:      o.verifyPostUpgrade(clusterVersion),
+        },
+    }
+}
+
+func (o *Orchestrator) executePreflightChecks(clusterVersion *bkev1.ClusterVersion) func(ctx context.Context) error {
+    return func(ctx context.Context) error {
+        o.log.Info("Running preflight checks")
+        
+        // 1. 检查集群健康状态
+        if err := o.checkClusterHealth(ctx); err != nil {
+            return fmt.Errorf("cluster health check failed: %v", err)
+        }
+        
+        // 2. 检查资源配额
+        if err := o.checkResourceQuota(ctx); err != nil {
+            return fmt.Errorf("resource quota check failed: %v", err)
+        }
+        
+        // 3. 检查升级路径
+        if err := o.checkUpgradePath(clusterVersion); err != nil {
+            return fmt.Errorf("upgrade path check failed: %v", err)
+        }
+        
+        return nil
+    }
+}
+
+func (o *Orchestrator) verifyPreflightChecks(clusterVersion *bkev1.ClusterVersion) func(ctx context.Context) (bool, error) {
+    return func(ctx context.Context) (bool, error) {
+        // 预检查是同步的，直接返回true
+        return true, nil
+    }
+}
+
+func (o *Orchestrator) downloadManifests(clusterVersion *bkev1.ClusterVersion) func(ctx context.Context) error {
+    return func(ctx context.Context) error {
+        o.log.Info("Downloading upgrade manifests")
+        
+        // 下载清单
+        manifests, err := o.manifestGenerator.GenerateUpgradeManifests(
+            ctx,
+            clusterVersion.Spec.DesiredVersion.Version,
+            clusterVersion.Spec.DesiredVersion.Image,
+        )
+        if err != nil {
+            return err
+        }
+        
+        // 应用清单
+        for _, manifest := range manifests {
+            if err := o.applyManifest(ctx, manifest); err != nil {
+                return err
+            }
+        }
+        
+        return nil
+    }
+}
+
+func (o *Orchestrator) verifyManifests(clusterVersion *bkev1.ClusterVersion) func(ctx context.Context) (bool, error) {
+    return func(ctx context.Context) (bool, error) {
+        // 验证清单是否已应用
+        return true, nil
+    }
+}
+
+func (o *Orchestrator) upgradeControlPlane(clusterVersion *bkev1.ClusterVersion) func(ctx context.Context) error {
+    return func(ctx context.Context) error {
+        o.log.Info("Upgrading control plane")
+        
+        // 1. 升级ETCD
+        if err := o.operatorManager.UpgradeOperator(ctx, "etcd", clusterVersion.Spec.DesiredVersion.Version); err != nil {
+            return fmt.Errorf("failed to upgrade etcd: %v", err)
+        }
+        
+        // 2. 升级API Server
+        if err := o.operatorManager.UpgradeOperator(ctx, "kube-apiserver", clusterVersion.Spec.DesiredVersion.Version); err != nil {
+            return fmt.Errorf("failed to upgrade kube-apiserver: %v", err)
+        }
+        
+        // 3. 升级Controller Manager
+        if err := o.operatorManager.UpgradeOperator(ctx, "kube-controller-manager", clusterVersion.Spec.DesiredVersion.Version); err != nil {
+            return fmt.Errorf("failed to upgrade kube-controller-manager: %v", err)
+        }
+        
+        // 4. 升级Scheduler
+        if err := o.operatorManager.UpgradeOperator(ctx, "kube-scheduler", clusterVersion.Spec.DesiredVersion.Version); err != nil {
+            return fmt.Errorf("failed to upgrade kube-scheduler: %v", err)
+        }
+        
+        return nil
+    }
+}
+
+func (o *Orchestrator) verifyControlPlane(clusterVersion *bkev1.ClusterVersion) func(ctx context.Context) (bool, error) {
+    return func(ctx context.Context) (bool, error) {
+        // 验证控制平面组件是否健康
+        operators := []string{"etcd", "kube-apiserver", "kube-controller-manager", "kube-scheduler"}
+        
+        for _, operatorName := range operators {
+            healthy, err := o.operatorManager.IsOperatorHealthy(ctx, operatorName)
+            if err != nil {
+                return false, err
+            }
+            
+            if !healthy {
+                o.log.Info("Operator not healthy yet", "operator", operatorName)
+                return false, nil
+            }
+        }
+        
+        return true, nil
+    }
+}
+
+func (o *Orchestrator) rollbackControlPlane(clusterVersion *bkev1.ClusterVersion) func(ctx context.Context) error {
+    return func(ctx context.Context) error {
+        o.log.Info("Rolling back control plane")
+        
+        // 回滚控制平面组件
+        // ...
+        
+        return nil
+    }
+}
+
+func (o *Orchestrator) upgradeWorkers(clusterVersion *bkev1.ClusterVersion) func(ctx context.Context) error {
+    return func(ctx context.Context) error {
+        o.log.Info("Upgrading worker nodes")
+        
+        // 升级Worker节点
+        // ...
+        
+        return nil
+    }
+}
+
+func (o *Orchestrator) verifyWorkers(clusterVersion *bkev1.ClusterVersion) func(ctx context.Context) (bool, error) {
+    return func(ctx context.Context) (bool, error) {
+        // 验证Worker节点是否健康
+        return true, nil
+    }
+}
+
+func (o *Orchestrator) rollbackWorkers(clusterVersion *bkev1.ClusterVersion) func(ctx context.Context) error {
+    return func(ctx context.Context) error {
+        o.log.Info("Rolling back worker nodes")
+        return nil
+    }
+}
+
+func (o *Orchestrator) upgradeAddons(clusterVersion *bkev1.ClusterVersion) func(ctx context.Context) error {
+    return func(ctx context.Context) error {
+        o.log.Info("Upgrading cluster addons")
+        
+        // 升级插件
+        // ...
+        
+        return nil
+    }
+}
+
+func (o *Orchestrator) verifyAddons(clusterVersion *bkev1.ClusterVersion) func(ctx context.Context) (bool, error) {
+    return func(ctx context.Context) (bool, error) {
+        return true, nil
+    }
+}
+
+func (o *Orchestrator) executePostUpgrade(clusterVersion *bkev1.ClusterVersion) func(ctx context.Context) error {
+    return func(ctx context.Context) error {
+        o.log.Info("Executing post-upgrade tasks")
+        
+        // 后升级任务
+        // ...
+        
+        return nil
+    }
+}
+
+func (o *Orchestrator) verifyPostUpgrade(clusterVersion *bkev1.ClusterVersion) func(ctx context.Context) (bool, error) {
+    return func(ctx context.Context) (bool, error) {
+        return true, nil
+    }
+}
+```
+#### 2.3 ClusterOperator Manager
+```go
+// pkg/cvo/operator/manager.go
+package operator
+
+import (
+    "context"
+    "fmt"
+    
+    "github.com/go-logr/logr"
+    appsv1 "k8s.io/api/apps/v1"
+    corev1 "k8s.io/api/core/v1"
+    "k8s.io/apimachinery/pkg/api/errors"
+    metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+    "k8s.io/apimachinery/pkg/runtime"
+    "sigs.k8s.io/controller-runtime/pkg/client"
+    
+    bkev1 "github.com/bocloud/bke/api/v1"
+)
+
+// Manager 操作员管理器
+type Manager struct {
+    client client.Client
+    scheme *runtime.Scheme
+    log    logr.Logger
+}
+
+func NewManager(client client.Client, scheme *runtime.Scheme, log logr.Logger) *Manager {
+    return &Manager{
+        client: client,
+        scheme: scheme,
+        log:    log,
+    }
+}
+
+func (m *Manager) UpgradeOperator(ctx context.Context, operatorName, version string) error {
+    m.log.Info("Upgrading operator", "operator", operatorName, "version", version)
+    
+    // 1. 获取或创建ClusterOperator
+    clusterOperator := &bkev1.ClusterOperator{}
+    err := m.client.Get(ctx, client.ObjectKey{Name: operatorName}, clusterOperator)
+    if errors.IsNotFound(err) {
+        clusterOperator = &bkev1.ClusterOperator{
+            ObjectMeta: metav1.ObjectMeta{
+                Name: operatorName,
+            },
+        }
+        if err := m.client.Create(ctx, clusterOperator); err != nil {
+            return err
+        }
+    } else if err != nil {
+        return err
+    }
+    
+    // 2. 更新状态为Progressing
+    m.setCondition(clusterOperator, bkev1.ClusterOperatorConditionProgressing, "Upgrading", fmt.Sprintf("Upgrading to version %s", version))
+    
+    // 3. 根据操作员类型执行升级
+    switch operatorName {
+    case "etcd":
+        return m.upgradeEtcd(ctx, version)
+    case "kube-apiserver":
+        return m.upgradeAPIServer(ctx, version)
+    case "kube-controller-manager":
+        return m.upgradeControllerManager(ctx, version)
+    case "kube-scheduler":
+        return m.upgradeScheduler(ctx, version)
+    default:
+        return fmt.Errorf("unknown operator: %s", operatorName)
+    }
+}
+
+func (m *Manager) upgradeEtcd(ctx context.Context, version string) error {
+    m.log.Info("Upgrading etcd", "version", version)
+    
+    // 1. 获取etcd Pod
+    pods := &corev1.PodList{}
+    if err := m.client.List(ctx, pods, client.MatchingLabels{"component": "etcd"}); err != nil {
+        return err
+    }
+    
+    // 2. 逐个升级etcd Pod
+    for _, pod := range pods.Items {
+        if err := m.upgradeEtcdPod(ctx, &pod, version); err != nil {
+            return err
+        }
+        
+        // 等待Pod就绪
+        if err := m.waitForPodReady(ctx, pod.Name, pod.Namespace); err != nil {
+            return err
+        }
+    }
+    
+    return nil
+}
+
+func (m *Manager) upgradeEtcdPod(ctx context.Context, pod *corev1.Pod, version string) error {
+    // 1. 删除旧Pod
+    if err := m.client.Delete(ctx, pod); err != nil {
+        return err
+    }
+    
+    // 2. 等待新Pod创建（由Static Pod管理器自动创建）
+    // ...
+    
+    return nil
+}
+
+func (m *Manager) upgradeAPIServer(ctx context.Context, version string) error {
+    m.log.Info("Upgrading kube-apiserver", "version", version)
+    
+    // 升级API Server
+    // ...
+    
+    return nil
+}
+
+func (m *Manager) upgradeControllerManager(ctx context.Context, version string) error {
+    m.log.Info("Upgrading kube-controller-manager", "version", version)
+    
+    // 升级Controller Manager
+    // ...
+    
+    return nil
+}
+
+func (m *Manager) upgradeScheduler(ctx context.Context, version string) error {
+    m.log.Info("Upgrading kube-scheduler", "version", version)
+    
+    // 升级Scheduler
+    // ...
+    
+    return nil
+}
+
+func (m *Manager) IsOperatorHealthy(ctx context.Context, operatorName string) (bool, error) {
+    clusterOperator := &bkev1.ClusterOperator{}
+    if err := m.client.Get(ctx, client.ObjectKey{Name: operatorName}, clusterOperator); err != nil {
+        return false, err
+    }
+    
+    // 检查条件
+    for _, condition := range clusterOperator.Status.Conditions {
+        if condition.Type == bkev1.ClusterOperatorConditionAvailable && condition.Status == corev1.ConditionTrue {
+            return true, nil
+        }
+    }
+    
+    return false, nil
+}
+
+func (m *Manager) setCondition(
+    clusterOperator *bkev1.ClusterOperator,
+    conditionType bkev1.ClusterOperatorConditionType,
+    reason, message string,
+) {
+    now := metav1.Now()
+    
+    for i, condition := range clusterOperator.Status.Conditions {
+        if condition.Type == conditionType {
+            clusterOperator.Status.Conditions[i] = bkev1.ClusterOperatorCondition{
+                Type:               conditionType,
+                Status:             corev1.ConditionTrue,
+                LastTransitionTime: now,
+                Reason:             reason,
+                Message:            message,
+            }
+            return
+        }
+    }
+    
+    clusterOperator.Status.Conditions = append(clusterOperator.Status.Conditions, bkev1.ClusterOperatorCondition{
+        Type:               conditionType,
+        Status:             corev1.ConditionTrue,
+        LastTransitionTime: now,
+        Reason:             reason,
+        Message:            message,
+    })
+}
+
+func (m *Manager) waitForPodReady(ctx context.Context, podName, namespace string) error {
+    // 等待Pod就绪
+    // ...
+    
+    return nil
+}
+```
+### 三、Manifest生成系统
+#### 3.1 Release Manifest Generator
+```go
+// pkg/cvo/manifest/generator.go
+package manifest
+
+import (
+    "context"
+    "fmt"
+    "io/ioutil"
+    "net/http"
+    "path/filepath"
+    
+    "github.com/go-logr/logr"
+    "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+    "k8s.io/apimachinery/pkg/runtime/serializer/json"
+    "sigs.k8s.io/yaml"
+)
+
+// Generator 清单生成器
+type Generator struct {
+    log           logr.Logger
+    releaseServer string
+    cacheDir      string
+}
+
+func NewGenerator(log logr.Logger) *Generator {
+    return &Generator{
+        log:           log,
+        releaseServer: "https://releases.bke.bocloud.com",
+        cacheDir:      "/var/cache/bke/releases",
+    }
+}
+
+func (g *Generator) GenerateUpgradeManifests(ctx context.Context, version, image string) ([]*unstructured.Unstructured, error) {
+    g.log.Info("Generating upgrade manifests", "version", version, "image", image)
+    
+    // 1. 下载Release Manifest
+    releaseManifest, err := g.downloadReleaseManifest(ctx, version, image)
+    if err != nil {
+        return nil, err
+    }
+    
+    // 2. 解析Manifest
+    manifests, err := g.parseManifests(releaseManifest)
+    if err != nil {
+        return nil, err
+    }
+    
+    // 3. 应用版本覆盖
+    manifests, err = g.applyVersionOverrides(manifests, version)
+    if err != nil {
+        return nil, err
+    }
+    
+    return manifests, nil
+}
+
+func (g *Generator) downloadReleaseManifest(ctx context.Context, version, image string) ([]byte, error) {
+    // 1. 检查本地缓存
+    cacheFile := filepath.Join(g.cacheDir, version, "release-manifest.yaml")
+    if data, err := ioutil.ReadFile(cacheFile); err == nil {
+        g.log.Info("Using cached release manifest", "version", version)
+        return data, nil
+    }
+    
+    // 2. 从Release Server下载
+    url := fmt.Sprintf("%s/%s/release-manifest.yaml", g.releaseServer, version)
+    
+    req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+    if err != nil {
+        return nil, err
+    }
+    
+    resp, err := http.DefaultClient.Do(req)
+    if err != nil {
+        return nil, err
+    }
+    defer resp.Body.Close()
+    
+    if resp.StatusCode != http.StatusOK {
+        return nil, fmt.Errorf("failed to download release manifest: %s", resp.Status)
+    }
+    
+    data, err := ioutil.ReadAll(resp.Body)
+    if err != nil {
+        return nil, err
+    }
+    
+    // 3. 保存到缓存
+    if err := ioutil.WriteFile(cacheFile, data, 0644); err != nil {
+        g.log.Error(err, "Failed to cache release manifest")
+    }
+    
+    return data, nil
+}
+
+func (g *Generator) parseManifests(data []byte) ([]*unstructured.Unstructured, error) {
+    var manifests []*unstructured.Unstructured
+    
+    // 分割YAML文档
+    documents := g.splitYAMLDocuments(data)
+    
+    for _, doc := range documents {
+        obj := &unstructured.Unstructured{}
+        if err := yaml.Unmarshal(doc, obj); err != nil {
+            return nil, err
+        }
+        
+        if obj.GetKind() != "" {
+            manifests = append(manifests, obj)
+        }
+    }
+    
+    return manifests, nil
+}
+
+func (g *Generator) splitYAMLDocuments(data []byte) [][]byte {
+    var documents [][]byte
+    
+    // 使用yaml分隔符分割文档
+    // ...
+    
+    return documents
+}
+
+func (g *Generator) applyVersionOverrides(manifests []*unstructured.Unstructured, version string) ([]*unstructured.Unstructured, error) {
+    // 应用版本覆盖
+    for _, manifest := range manifests {
+        // 更新镜像版本
+        if err := g.updateImageVersions(manifest, version); err != nil {
+            return nil, err
+        }
+    }
+    
+    return manifests, nil
+}
+
+func (g *Generator) updateImageVersions(manifest *unstructured.Unstructured, version string) error {
+    // 更新容器镜像版本
+    // ...
+    
+    return nil
+}
+
+// ReleaseManifest Release清单结构
+type ReleaseManifest struct {
+    Version   string            `json:"version"`
+    Metadata  ReleaseMetadata   `json:"metadata"`
+    Images    map[string]string `json:"images"`
+    Manifests []string          `json:"manifests"`
+}
+
+type ReleaseMetadata struct {
+    ReleaseTime string `json:"releaseTime"`
+    Channel     string `json:"channel"`
+    Architecture string `json:"architecture"`
+}
+```
+### 四、与现有框架集成
+#### 4.1 Asset集成
+```go
+// pkg/asset/clusterversion/clusterversion.go
+package clusterversion
+
+import (
+    "context"
+    
+    "github.com/bocloud/bke/pkg/asset"
+    "github.com/bocloud/bke/pkg/asset/installconfig"
+    bkev1 "github.com/bocloud/bke/api/v1"
+    metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// ClusterVersionAsset 集群版本资产
+type ClusterVersionAsset struct {
+    ClusterVersion *bkev1.ClusterVersion
+    Files          []*asset.File
+}
+
+func (c *ClusterVersionAsset) Dependencies() []asset.Asset {
+    return []asset.Asset{
+        &installconfig.InstallConfig{},
+        &installconfig.ClusterID{},
+    }
+}
+
+func (c *ClusterVersionAsset) Generate(ctx context.Context, parents asset.Parents) error {
+    installConfig := &installconfig.InstallConfig{}
+    clusterID := &installconfig.ClusterID{}
+    parents.Get(installConfig, clusterID)
+    
+    c.ClusterVersion = &bkev1.ClusterVersion{
+        TypeMeta: metav1.TypeMeta{
+            APIVersion: "bke.bocloud.com/v1",
+            Kind:       "ClusterVersion",
+        },
+        ObjectMeta: metav1.ObjectMeta{
+            Name: "version",
+        },
+        Spec: bkev1.ClusterVersionSpec{
+            ClusterID: clusterID.ID,
+            DesiredVersion: bkev1.Version{
+                Version: installConfig.Config.Spec.KubernetesVersion,
+                Image:   installConfig.Config.Spec.ImageRepo.Domain + "/bke-release:" + installConfig.Config.Spec.KubernetesVersion,
+            },
+            Channel:     "stable",
+            Upstream:    "https://releases.bke.bocloud.com",
+            Architecture: "amd64",
+        },
+    }
+    
+    data, _ := yaml.Marshal(c.ClusterVersion)
+    c.Files = []*asset.File{
+        {
+            Filename: "cluster-version.yaml",
+            Data:     data,
+        },
+    }
+    
+    return nil
+}
+```
+#### 4.2 Installer集成
+```go
+// pkg/installer/installer.go (更新)
+func (i *Installer) Install(ctx context.Context) error {
+    // ... 前面的阶段 ...
+    
+    // 阶段11: 部署CVO
+    log.Info("Phase 11: Deploying Cluster Version Operator...")
+    if err := i.deployCVO(ctx); err != nil {
+        return fmt.Errorf("phase 11 failed: %v", err)
+    }
+    i.saveProgress("cvo", 100)
+    
+    // 阶段12: 初始化ClusterVersion
+    log.Info("Phase 12: Initializing ClusterVersion...")
+    if err := i.initializeClusterVersion(ctx); err != nil {
+        return fmt.Errorf("phase 12 failed: %v", err)
+    }
+    i.saveProgress("cluster-version", 100)
+    
+    // 阶段13: 等待CVO就绪
+    log.Info("Phase 13: Waiting for CVO to be ready...")
+    if err := i.waitForCVOReady(ctx); err != nil {
+        return fmt.Errorf("phase 13 failed: %v", err)
+    }
+    i.saveProgress("cvo-ready", 100)
+    
+    // ... 后续阶段 ...
+}
+
+func (i *Installer) deployCVO(ctx context.Context) error {
+    // 1. 生成CVO清单
+    cvoManifests := i.generateCVOManifests()
+    
+    // 2. 应用清单
+    for _, manifest := range cvoManifests {
+        if err := i.applyManifest(ctx, manifest); err != nil {
+            return err
+        }
+    }
+    
+    return nil
+}
+
+func (i *Installer) initializeClusterVersion(ctx context.Context) error {
+    // 1. 创建ClusterVersion资源
+    clusterVersionAsset := &clusterversion.ClusterVersionAsset{}
+    if err := i.assetStore.Fetch(ctx, clusterVersionAsset); err != nil {
+        return err
+    }
+    
+    // 2. 应用ClusterVersion
+    if err := i.k8sClient.Create(ctx, clusterVersionAsset.ClusterVersion); err != nil {
+        return err
+    }
+    
+    return nil
+}
+
+func (i *Installer) waitForCVOReady(ctx context.Context) error {
+    // 等待CVO就绪
+    // ...
+    
+    return nil
+}
+```
+### 五、升级流程示例
+#### 5.1 自动升级
+```yaml
+apiVersion: bke.bocloud.com/v1
+kind: ClusterVersion
+metadata:
+  name: version
+spec:
+  clusterID: my-cluster-abc123
+  desiredVersion:
+    version: v1.29.0
+    image: registry.example.com/bke-release:v1.29.0
+  channel: stable
+  upstream: https://releases.bke.bocloud.com
+  upgradeConfig:
+    strategy: Auto
+    upgradeWindow:
+      start: "02:00"
+      duration: "4h"
+      timezone: "Asia/Shanghai"
+    maxUnavailable: 1
+```
+#### 5.2 手动升级
+```bash
+# 查看可用更新
+bkeadm upgrade list
+
+# 检查升级前状态
+bkeadm upgrade preflight --version v1.29.0
+
+# 执行升级
+bkeadm upgrade apply --version v1.29.0
+
+# 查看升级状态
+bkeadm upgrade status
+
+# 暂停升级
+bkeadm upgrade pause
+
+# 恢复升级
+bkeadm upgrade resume
+
+# 回滚升级
+bkeadm upgrade rollback
+```
+### 六、关键优势
+1. **自动化升级**：CVO自动管理核心组件的升级生命周期
+2. **声明式管理**：使用ClusterVersion CRD声明式管理集群版本
+3. **滚动升级**：支持控制平面和Worker节点的滚动升级
+4. **升级窗口**：支持配置升级时间窗口
+5. **回滚机制**：升级失败时自动回滚
+6. **健康检查**：升级过程中持续监控集群健康状态
+7. **版本管理**：完整的版本历史记录和状态跟踪
+8. **插件支持**：支持自定义ClusterOperator扩展升级能力
+
+这个方案将CVO完美集成到现有框架中，实现了核心组件的自动化升级，同时保持了框架的可扩展性和灵活性。
+
+
