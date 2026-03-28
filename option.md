@@ -1,3 +1,156 @@
+     
+# 三年技术演进路线图 (Mermaid 架构图)
+## 2025年 - 基础夯实
+```mermaid
+graph TB
+    subgraph API层["API 层"]
+        CONSOLE["bke-console-service<br/>控制台后端"]
+        WEBSITE["bke-console-website<br/>控制台前端"]
+        INSTALLER["installer-service<br/>安装服务"]
+    end
+
+    subgraph 核心引擎["核心引擎层 (重构重点)"]
+        CAPBKE["cluster-api-provider-bke<br/>Provider 接口抽象"]
+        OSProvider["OS Provider 注册机制<br/>openEuler | Kylin | UOS"]
+        ERRORS["统一错误处理<br/>错误码 + 上下文"]
+    end
+
+    subgraph 基础设施["基础设施模式"]
+        IPI["IPI 模式<br/>自动创建基础设施"]
+        UPI["UPI 模式<br/>用户提供基础设施"]
+    end
+
+    subgraph 安全加固["安全加固"]
+        TLS["TLS 默认验证"]
+        AUTH["OAuth2 认证增强"]
+    end
+
+    API层 --> 核心引擎
+    核心引擎 --> 基础设施
+    核心引擎 --> 安全加固
+
+    subgraph 里程碑["2025 里程碑"]
+        M1["✅ 国产化认证通过"]
+        M2["✅ 信创目录入库"]
+    end
+
+    style CAPBKE fill:#f9f,stroke:#333,stroke-width:3px
+    style OSProvider fill:#bbf,stroke:#333,stroke-width:2px
+    style 里程碑 fill:#9f9,stroke:#333,stroke-width:2px
+```
+## 2026年 - 能力提升
+```mermaid
+graph TB
+    subgraph 升级管理["升级管理 (新增)"]
+        CVO["CVO 控制器<br/>Cluster Version Operator"]
+        CV["ClusterVersion CRD<br/>版本声明式管理"]
+        ROLLBACK["自动回滚机制<br/>失败自动恢复"]
+    end
+
+    subgraph 资产管理["资产管理 (新增)"]
+        ASSET["Asset 框架<br/>依赖图管理"]
+        DAG["DAG 调度器<br/>并行生成优化"]
+        STATE["状态追踪器<br/>断点续传"]
+    end
+
+    subgraph 节点引导["节点引导 (增强)"]
+        IGNITION["Ignition 支持<br/>声明式配置"]
+        CLOUDINIT["CloudInit 支持<br/>云平台兼容"]
+        SSH["SSH 方式<br/>向后兼容"]
+    end
+
+    subgraph 核心引擎["核心引擎层"]
+        CAPBKE["cluster-api-provider-bke<br/>状态机模式"]
+        PROVIDER["Provider 接口<br/>已抽象完成"]
+    end
+
+    升级管理 --> 核心引擎
+    资产管理 --> 核心引擎
+    节点引导 --> 核心引擎
+
+    subgraph 里程碑["2026 里程碑"]
+        M1["✅ 对标 OpenShift Installer"]
+        M2["✅ 企业级稳定性认证"]
+    end
+
+    style CVO fill:#f9f,stroke:#333,stroke-width:3px
+    style ASSET fill:#bbf,stroke:#333,stroke-width:2px
+    style IGNITION fill:#bfb,stroke:#333,stroke-width:2px
+    style 里程碑 fill:#9f9,stroke:#333,stroke-width:2px
+```
+## 2027年 - 生态完善
+```mermaid
+graph TB
+    subgraph 多基础设施["多基础设施支持 (新增)"]
+        VSPHERE["vSphere Provider<br/>VMware 环境"]
+        OPENSTACK["OpenStack Provider<br/>私有云环境"]
+        BAREMETAL["BareMetal Provider<br/>裸金属环境"]
+    end
+
+    subgraph GitOps["GitOps 集成 (新增)"]
+        ARGOCD["ArgoCD 集成<br/>声明式部署"]
+        FLUX["Flux CD 集成<br/>Git 驱动"]
+        DRIFT["配置漂移检测<br/>自动修复"]
+    end
+
+    subgraph 多集群["多集群联邦 (新增)"]
+        FEDERATION["集群联邦<br/>统一管理"]
+        KARMADA["Karmada 集成<br/>跨集群调度"]
+        POLICY["全局策略<br/>统一治理"]
+    end
+
+    subgraph AI运维["AI 辅助运维 (新增)"]
+        PREDICT["故障预测<br/>智能告警"]
+        OPTIMIZE["资源优化<br/>成本分析"]
+        HEAL["自愈能力<br/>自动修复"]
+    end
+
+    subgraph 核心平台["核心平台"]
+        ENGINE["安装部署引擎<br/>成熟稳定"]
+        CVO["CVO 升级机制<br/>生产验证"]
+    end
+
+    多基础设施 --> 核心平台
+    GitOps --> 核心平台
+    多集群 --> 核心平台
+    AI运维 --> 核心平台
+
+    subgraph 里程碑["2027 里程碑"]
+        M1["✅ 行业标杆产品"]
+        M2["✅ 开源社区贡献"]
+    end
+
+    style VSPHERE fill:#f9f,stroke:#333,stroke-width:2px
+    style OPENSTACK fill:#f9f,stroke:#333,stroke-width:2px
+    style ARGOCD fill:#bbf,stroke:#333,stroke-width:2px
+    style FEDERATION fill:#bfb,stroke:#333,stroke-width:2px
+    style AI运维 fill:#fbf,stroke:#333,stroke-width:2px
+    style 里程碑 fill:#9f9,stroke:#333,stroke-width:2px
+```
+## 三年演进总览
+```mermaid
+timeline
+    title openFuyao 安装部署三年技术演进
+    2025 : 基础夯实
+         : Provider 接口抽象
+         : UPI/IPI 双模式
+         : OS Provider 注册
+         : 安全默认配置
+         : 🎯 国产化认证
+    2026 : 能力提升
+         : CVO 升级机制
+         : ClusterVersion CRD
+         : Asset 依赖管理
+         : Ignition 支持
+         : 🎯 对标 OpenShift
+    2027 : 生态完善
+         : 多基础设施支持
+         : GitOps 集成
+         : 多集群联邦
+         : AI 辅助运维
+         : 🎯 行业标杆
+```
+        
 # openFuyao 安装部署国产化专项战场
 ## 一、专项背景与范围
 ```
