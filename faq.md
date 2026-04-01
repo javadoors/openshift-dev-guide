@@ -116,3 +116,43 @@ flowchart TD
 - 镜像是由多个层组成的。  
 - 镜像可以启动多个容器实例。  
 - 容器共享镜像层，但有自己的运行时读写层。  
+
+# 镜像同步`skopeo` 和 `crane`
+在 **镜像同步** 场景下，`skopeo` 和 `crane` 都是常用的工具，可以在不同的镜像仓库之间复制镜像，而无需先拉取到本地再推送。下面给你几个实用样例：  
+## 📌 使用 `skopeo` 同步镜像
+`skopeo` 是 Red Hat 推出的容器镜像管理工具，支持直接在仓库之间复制镜像。
+### 1. 从 Docker Hub 同步到私有仓库
+```bash
+skopeo copy docker://nginx:1.23.0-alpine docker://cr.openfuyao.cn/openfuyao/nginx:1.23.0-alpine
+```
+### 2. 从私有仓库同步到本地目录
+```bash
+skopeo copy docker://cr.openfuyao.cn/openfuyao/nginx:1.23.0-alpine dir:/tmp/nginx-image
+```
+### 3. 从本地目录导入到另一个仓库
+```bash
+skopeo copy dir:/tmp/nginx-image docker://registry.example.com/nginx:1.23.0-alpine
+```
+## 📌 使用 `crane` 同步镜像
+`crane` 是 Google 的 go-containerregistry 提供的工具，轻量快速，常用于 CI/CD。
+### 1. 复制镜像到另一个仓库
+```bash
+crane cp nginx:1.23.0-alpine cr.openfuyao.cn/openfuyao/nginx:1.23.0-alpine
+```
+### 2. 拉取镜像到本地 tar 文件
+```bash
+crane pull nginx:1.23.0-alpine nginx.tar
+```
+### 3. 推送本地 tar 文件到仓库
+```bash
+crane push nginx.tar cr.openfuyao.cn/openfuyao/nginx:1.23.0-alpine
+```
+## 📊 对比总结
+| 工具   | 优点 | 常见场景 |
+|--------|------|----------|
+| **skopeo** | 功能全面，支持多种存储后端（dir、tar、registry） | 跨仓库同步、离线导出导入 |
+| **crane**  | 命令简洁，速度快，适合 CI/CD | 快速复制、拉取/推送 tar 文件 |
+
+✅ **总结**：  
+- 如果你需要 **跨仓库同步** 或 **多种存储后端支持** → 用 **skopeo**。  
+- 如果你在 **CI/CD 流水线中快速复制镜像** → 用 **crane**。  
