@@ -1,3 +1,125 @@
+# **Agent 规范**
+帮助你在设计和使用 Trae Agent 时保持统一性和可维护性。  
+## 📌 Agent 规范核心要素
+### 1. 基本字段
+- **name**：Agent 的唯一标识（如 `qa`、`doc`、`code`）。  
+- **type**：Agent 的类别（问答、文档、代码、对话、测试等）。  
+- **description**：简要说明用途和定位。  
+- **input**：定义输入类型（文本、代码、上下文标签）。  
+- **output**：定义输出类型（答案、文档、代码片段、对话、测试用例）。  
+- **example**：典型调用方式，结合 `@agent` 和 `#context`。  
+### 2. 规范设计原则
+- **命名规范**：简短、直观，避免歧义（如 `qa` 而不是 `questionAgent`）。  
+- **职责单一**：每个 Agent 专注于一个任务类型，避免混合职责。  
+- **上下文扩展**：通过 `#` 标签增加主题或背景，而不是在 Agent 内部硬编码。  
+- **可组合性**：支持 `@agent + #context + prompt` 的组合调用。  
+- **可维护性**：输入输出类型明确，方便后续扩展或替换。  
+### 3. 示例规范模板
+```yaml
+agent:
+  name: qa
+  type: question-answering
+  description: 用于知识问答和解释说明
+  input: text (问题)
+  output: text (答案)
+  example: "@qa #kubernetes 请解释 K3s 架构"
+```
+
+```yaml
+agent:
+  name: doc
+  type: documentation
+  description: 用于生成说明文档、流程指南
+  input: text (主题 + 上下文标签)
+  output: structured text (文档)
+  example: "@doc #rpm #patch 生成 RPM Patch 制作流程文档"
+```
+
+```yaml
+agent:
+  name: code
+  type: code-generation
+  description: 用于编写脚本、函数、配置文件
+  input: text (编程语言 + 功能描述)
+  output: code snippet
+  example: "@code #python 写一个合并图片的脚本"
+```
+
+```yaml
+agent:
+  name: chat
+  type: conversational
+  description: 用于交互式解释、讨论
+  input: text (问题或话题)
+  output: conversational text
+  example: "@chat #k3s 解释 K3s 与 K8s 区别"
+```
+
+```yaml
+agent:
+  name: test
+  type: testing
+  description: 用于生成测试用例、验证逻辑
+  input: text (功能描述)
+  output: test cases / validation script
+  example: "@test #api 为用户登录接口生成测试用例"
+```
+## ✅ 总结
+- **Agent 规范**的核心是：**统一字段、职责单一、上下文可扩展、输入输出明确**。  
+- 通过 `@agent` 指定角色，`#context` 增加背景，保持调用方式简洁一致。  
+- 模板化配置让不同 Agent 的创建和维护更高效。  
+
+# Trae 插件
+要把上面定义好的 **QA、Doc、Code、Chat、Test Agent** 添加到 VSCode 的 **Trae 插件**，通常需要在插件的配置文件（例如 `trae.json` 或 `.trae/config.yaml`）中声明这些 Agent。下面给你一个统一的配置模板示例：  
+## 📌 VSCode Trae 插件 Agent 配置示例
+
+```yaml
+agents:
+  - name: qa
+    type: question-answering
+    description: 用于知识问答和解释说明
+    input: text
+    output: text
+    example: "@qa #kubernetes 请解释 K3s 架构"
+
+  - name: doc
+    type: documentation
+    description: 用于生成说明文档、流程指南
+    input: text
+    output: structured text
+    example: "@doc #rpm #patch 生成 RPM Patch 制作流程文档"
+
+  - name: code
+    type: code-generation
+    description: 用于编写脚本、函数、配置文件
+    input: text
+    output: code snippet
+    example: "@code #python 写一个合并图片的脚本"
+
+  - name: chat
+    type: conversational
+    description: 用于交互式解释、讨论
+    input: text
+    output: conversational text
+    example: "@chat #k3s 解释 K3s 与 K8s 区别"
+
+  - name: test
+    type: testing
+    description: 用于生成测试用例、验证逻辑
+    input: text
+    output: test cases
+    example: "@test #api 为用户登录接口生成测试用例"
+```
+## 🧩 使用方式
+1. 在 VSCode 中安装并启用 **Trae 插件**。  
+2. 在项目根目录或用户配置目录下创建/编辑 `trae.yaml` 或 `trae.json`。  
+3. 将上述配置粘贴进去，保存。  
+4. 在 VSCode 命令面板或编辑器中直接使用：
+   - `@qa #kubernetes 请解释 K3s 架构`
+   - `@code #python 写一个合并图片的脚本`
+
+✅ **总结**：通过在 Trae 插件配置文件中添加这些 Agent，你就能在 VSCode 中快速调用不同类型的 Agent，结合 `@agent` 和 `#context` 标签实现精准的 Prompt 控制。  
+
 # Trae IDE Skills 编写指南
 ## 一、什么是 Skill？
 Skill（技能）是一份清晰、严谨、可执行的指令文档，用于扩展 AI 的专业能力。它明确在**什么条件下**，按照**哪些步骤**，产出**什么结果**。
