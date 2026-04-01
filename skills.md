@@ -594,4 +594,197 @@ func amountOverdue(query InvoiceQuery) float64 {
 
 
 如需创建具体的 Skill，请告诉我您的需求，我可以帮您生成完整的 SKILL.md 文件。
-        
+# 重构skill
+```
+# 代码重构技能
+
+## 1. 技能概述
+
+**技能名称**: refactor-code
+**技能版本**: 1.0.0
+**技能描述**: 提供系统化的代码重构方法和最佳实践，帮助改善代码质量、可读性和可维护性
+
+**触发条件**:
+- 当用户请求重构代码时
+- 当用户询问如何改进代码结构时
+- 当用户提到"重构"、"优化代码"、"改善代码"等关键词时
+
+**触发关键词**:
+- 重构
+- refactor
+- 优化代码
+- 改善代码
+- 代码质量
+- 技术债务
+- 代码异味
+
+## 2. 重构原则
+
+### 核心原则
+
+1. **小步重构**: 每次只做一个小改动，确保每步都可测试
+2. **保持行为不变**: 重构不应改变代码的外部行为
+3. **频繁测试**: 每次重构后运行测试确保功能正常
+4. **版本控制**: 每个重构步骤独立提交，便于回滚
+
+### 重构时机
+
+- 代码重复（DRY 原则违反）
+- 函数过长（超过 50 行）
+- 类过大（职责过多）
+- 参数列表过长（超过 3-4 个参数）
+- 嵌套过深（超过 3 层）
+- 命名不清晰
+
+## 3. 重构方法清单
+
+### 函数级别重构
+
+| 重构方法 | 说明 | 适用场景 |
+|---------|------|---------|
+| 提取函数 | 将代码片段提取为独立函数 | 代码重复、函数过长 |
+| 内联函数 | 将函数体直接嵌入调用处 | 函数体很简单 |
+| 提取变量 | 将表达式提取为变量 | 复杂表达式 |
+| 重命名函数/变量 | 使用更有意义的名称 | 命名不清晰 |
+| 分解条件表达式 | 将复杂的条件逻辑提取为函数 | 条件表达式复杂 |
+
+### 类级别重构
+
+| 重构方法 | 说明 | 适用场景 |
+|---------|------|---------|
+| 提取类 | 将部分功能提取为新类 | 类职责过多 |
+| 内联类 | 将类的功能合并到另一个类 | 类功能很少 |
+| 提取接口 | 提取公共接口 | 多个类有相似行为 |
+| 以工厂函数取代构造函数 | 使用工厂方法创建对象 | 创建逻辑复杂 |
+
+### 条件逻辑重构
+
+| 重构方法 | 说明 | 适用场景 |
+|---------|------|---------|
+| 分解条件表达式 | 提取条件判断为函数 | 条件表达式复杂 |
+| 合并条件表达式 | 合并多个条件判断 | 多个条件有相同结果 |
+| 以多态取代条件表达式 | 使用多态替代条件判断 | 有多个条件分支基于类型 |
+| 引入空对象 | 使用空对象替代 null 检查 | 多处需要 null 检查 |
+
+## 4. 代码异味识别
+
+| 异味类型 | 症状 | 建议重构 |
+|---------|------|---------|
+| 重复代码 | 相同/相似代码出现在多处 | 提取函数 |
+| 过长函数 | 函数超过 50 行 | 提取函数 |
+| 过大类 | 类超过 500 行或职责过多 | 提取类 |
+| 过长参数列表 | 参数超过 3-4 个 | 引入参数对象 |
+| 发散式变化 | 一个类因多种原因变化 | 提取类 |
+| 依恋情结 | 过多使用其他类的数据 | 移动函数 |
+| 基本类型偏执 | 过多使用基本类型 | 引入值对象 |
+| switch 语句 | 大量 switch/case | 以多态取代 |
+
+## 5. 重构工作流程
+
+```
+1. 识别问题 → 分析代码异味，确定重构目标
+2. 准备重构 → 确保测试覆盖，创建备份
+3. 执行重构 → 小步修改，每步后运行测试
+4. 验证结果 → 运行完整测试，代码审查
+```
+
+## 6. 重构示例
+
+### 提取函数
+
+**重构前**:
+```go
+func printOwing(invoice Invoice) {
+    outstanding := 0.0
+    fmt.Println("***********************")
+    fmt.Println("*** Customer Owes ***")
+    fmt.Println("***********************")
+    for _, order := range invoice.Orders {
+        outstanding += order.Amount
+    }
+    fmt.Printf("name: %s\n", invoice.Customer)
+    fmt.Printf("amount: %.2f\n", outstanding)
+}
+```
+
+**重构后**:
+```go
+func printOwing(invoice Invoice) {
+    printBanner()
+    outstanding := calculateOutstanding(invoice)
+    printDetails(invoice.Customer, outstanding)
+}
+
+func printBanner() {
+    fmt.Println("***********************")
+    fmt.Println("*** Customer Owes ***")
+    fmt.Println("***********************")
+}
+
+func calculateOutstanding(invoice Invoice) float64 {
+    outstanding := 0.0
+    for _, order := range invoice.Orders {
+        outstanding += order.Amount
+    }
+    return outstanding
+}
+
+func printDetails(customer string, outstanding float64) {
+    fmt.Printf("name: %s\n", customer)
+    fmt.Printf("amount: %.2f\n", outstanding)
+}
+```
+
+### 引入参数对象
+
+**重构前**:
+```go
+func amountInvoiced(start time.Time, end time.Time, customerID string, productID string) float64
+```
+
+**重构后**:
+```go
+type InvoiceQuery struct {
+    Start      time.Time
+    End        time.Time
+    CustomerID string
+    ProductID  string
+}
+
+func amountInvoiced(query InvoiceQuery) float64
+```
+
+## 7. 输出格式
+
+执行重构时按以下格式输出：
+
+```markdown
+## 重构分析
+
+**检测到的问题**:
+- [问题描述]
+
+**建议的重构方法**:
+- [重构方法]: [原因]
+
+## 重构方案
+
+### 重构前
+[原始代码]
+
+### 重构后
+[重构后代码]
+
+### 改进说明
+- [改进点]
+```
+
+## 8. 注意事项
+
+1. 不要在重构时添加新功能
+2. 每次小改动后确保测试通过
+3. 关注性能影响
+4. 重构后更新相关文档
+5. 每个重构步骤独立提交
+```
+```
