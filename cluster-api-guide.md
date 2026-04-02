@@ -557,20 +557,13 @@ flowchart TD
     B --> B1[InfrastructureCluster 接口]
     B --> B2[InfrastructureMachine 接口]
 
-    B1 --> C1[AWSCluster (CAPA)]
-    B1 --> C2[AzureCluster (CAPZ)]
-    B1 --> C3[DockerCluster (CAPD)]
+    B1 --> C1[AWSCluster：CAPA]
+    B1 --> C2[AzureCluster：CAPZ]
+    B1 --> C3[DockerCluster：CAPD]
 
     B2 --> D1[AWSMachine]
     B2 --> D2[AzureMachine]
     B2 --> D3[DockerMachine]
-
-    %% 样式定义
-    classDef core fill=#f9f,stroke=#333,stroke-width=1px;
-    classDef provider fill=#9ff,stroke=#333,stroke-width=1px;
-
-    class B1,B2 core
-    class C1,C2,C3,D1,D2,D3 provider
 ```
 📌 图解说明
 - **核心层 (紫色)**：Cluster API 只定义抽象接口（InfrastructureCluster、InfrastructureMachine），不规定具体字段。  
