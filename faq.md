@@ -314,3 +314,23 @@ Manifest List JSON 结构：
 - **Docker V2 Schema 2 List** → Docker Registry 的多架构镜像索引。  
 - **OCI Image Index** → OCI 标准的多架构镜像索引，更通用、跨平台。  
 
+# Bastion 节点
+在 **Cluster API (CAPI)** 的语境里，**Bastion 节点** 是一个常见但容易被忽略的概念。它并不是 CAPI 的核心 CRD 对象，而是 **基础设施 Provider（Infrastructure Provider）层面的一种辅助节点**。  
+## 📌 Bastion 节点的作用
+- **安全跳板机 (Jump Host)**：在云环境或受限网络里，工作节点和控制平面节点通常不直接暴露到公网。  
+- **用途**：Bastion 节点提供一个安全入口，管理员可以通过它 SSH 到集群节点。  
+- **位置**：通常部署在公有子网，具备公网 IP，作为访问私有子网中节点的中转。  
+## 🧩 在 Cluster API 中的角色
+- **Infrastructure Provider**（如 CAPA for AWS、CAPZ for Azure）会在集群创建时，自动或可选地创建 Bastion 节点。  
+- **Cluster 对象**里可以指定是否需要 Bastion 节点。  
+- Bastion 节点本身不是 CAPI 的核心 CRD，而是 Provider 的实现细节。  
+## 📊 类比理解
+- **Cluster** = 整个集群蓝图  
+- **ControlPlane** = 管理集群大脑  
+- **MachineDeployment** = 管理工作节点组  
+- **Bastion 节点** = 安全入口的“门卫”，帮助你进入集群内部  
+## ✅ 总结
+- Bastion 节点是 **安全访问集群的跳板机**，由 Infrastructure Provider 提供。  
+- 它不是 CAPI 的核心对象，但在实际生产环境里非常重要。  
+- 在 AWS、Azure 等 Provider 中，通常可以通过 Cluster 配置开启或关闭 Bastion 节点。  
+
