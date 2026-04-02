@@ -136,11 +136,6 @@ flowchart TD
     A --> I[Add-ons]:::ext
     A --> J[Runtime Extensions]:::ext
     A --> K[Bastion Node]:::infra
-
-    %% 样式定义
-    classDef core fill=#f9f,stroke=#333,stroke-width=1px;
-    classDef infra fill=#9ff,stroke=#333,stroke-width=1px;
-    classDef ext fill=#cfc,stroke=#333,stroke-width=1px;
 ```
 📌 图解说明
 - **核心对象 (紫色)**：Cluster、ControlPlane、MachineDeployment、MachineSet、Machine。  
