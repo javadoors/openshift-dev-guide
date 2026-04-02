@@ -141,6 +141,7 @@ flowchart TD
     classDef core fill=#f9f,stroke=#333,stroke-width=1px;
     classDef infra fill=#9ff,stroke=#333,stroke-width=1px;
     classDef ext fill=#cfc,stroke=#333,stroke-width=1px;
+```
 📌 图解说明
 - **核心对象 (紫色)**：Cluster、ControlPlane、MachineDeployment、MachineSet、Machine。  
 - **基础设施层 (蓝色)**：Infrastructure Provider、Bootstrap Provider、Bastion Node。  
