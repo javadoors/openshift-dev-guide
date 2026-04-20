@@ -1466,4 +1466,551 @@ func safeReconcile(ctx, etcdCR) -> Result:
 | 状态管理 | CR Status + Condition | 声明式，与 CVO 生态一致 |
 | 健康检查 | 多层分级 | Pod → Member → Cluster → Infra 逐层深入 |
 | 错误处理 | 四级分类 | 不同严重程度不同处理策略 |
-        
+
+# OpenShift Etcd Operator 升级样例与执行过程
+## 场景设定
+```
+集群: 3 Master 节点 OpenShift 集群
+当前 etcd 版本: v3.5.9
+目标 etcd 版本: v3.5.11
+升级触发: OpenShift 从 4.14 升级到 4.15，CVO 下发新版本清单
+```
+### 初始状态
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        升级前集群状态                             │
+│                                                                  │
+│  Master-0 (10.0.0.1)     Master-1 (10.0.0.2)     Master-2 (10.0.0.3) │
+│  ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐ │
+│  │ etcd Pod        │     │ etcd Pod        │     │ etcd Pod        │ │
+│  │ v3.5.9          │     │ v3.5.9          │     │ v3.5.9          │ │
+│  │ Role: Follower  │     │ Role: Leader    │     │ Role: Follower  │ │
+│  │ DB: 1.8GB       │     │ DB: 1.9GB       │     │ DB: 1.7GB       │ │
+│  │ Health: OK      │     │ Health: OK      │     │ Health: OK      │ │
+│  └─────────────────┘     └─────────────────┘     └─────────────────┘ │
+│                                                                  │
+│  Etcd CR Status:                                                 │
+│    currentVersion: 3.5.9                                         │
+│    desiredVersion: 3.5.9                                         │
+│    Available: True                                               │
+│    Degraded: False                                               │
+│    Upgradeable: True                                             │
+│    Progressing: False                                            │
+└─────────────────────────────────────────────────────────────────┘
+```
+## 完整执行时间线
+### T+0:00:00 — CVO 下发新版本
+CVO 在升级 OpenShift 4.14 → 4.15 过程中，更新 etcd Operator 的 Deployment 镜像版本，并更新 Etcd CR 的 `desiredVersion`。
+```yaml
+# CVO 更新后的 Etcd CR
+apiVersion: operator.openshift.io/v1
+kind: Etcd
+metadata:
+  name: cluster
+spec:
+  managementState: Managed
+status:
+  currentVersion: "3.5.9"
+  desiredVersion: "3.5.11"    # ← CVO 设置新目标版本
+  conditions:
+    - type: Available
+      status: "True"
+    - type: Progressing
+      status: "False"
+    - type: Degraded
+      status: "False"
+    - type: Upgradeable
+      status: "True"
+```
+### T+0:00:05 — Etcd Operator Reconcile 检测到版本差异
+Operator 的 Reconcile 循环被触发（Etcd CR 变更事件），进入 `determineDesiredAction` 逻辑：
+```
+Reconcile #1:
+  desiredVersion = "3.5.11"
+  currentVersion = "3.5.9"   ← getLowestMemberVersion()
+  
+  desiredVersion != currentVersion → Action = VersionUpgrade
+```
+### T+0:00:05 — PreCheck 阶段
+```
+┌──────────────────────────────────────────────────────────────┐
+│  PreFlight Checks                                             │
+│                                                               │
+│  ✓ Quorum Check: 3/3 members healthy → PASS                 │
+│  ✓ All Members Healthy: all endpoints return OK → PASS      │
+│  ✓ Disk Space: all nodes have >30% free → PASS              │
+│  ✓ Network Connectivity: all peer URLs reachable → PASS     │
+│  ✓ Version Compatibility: 3.5.9 → 3.5.11 (minor) → PASS    │
+│  ✓ No Active Alarms: etcdctl alarm list → empty → PASS      │
+│                                                               │
+│  Result: ALL PASSED → 进入 Backup 阶段                       │
+└──────────────────────────────────────────────────────────────┘
+```
+**如果 PreCheck 失败**（例如某个 member 不健康）：
+```
+✗ Quorum Check: 2/3 members healthy → FAIL
+  → setStatus(Upgradeable=False, "etcd member master-2 unhealthy, cannot upgrade")
+  → CVO 看到 Upgradeable=False，暂停整个集群升级
+  → 等待下次 Requeue 重新检查
+```
+### T+0:00:10 — Backup 阶段
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Pre-Upgrade Backup                                           │
+│                                                               │
+│  1. 选择备份源:                                               │
+│     Leader = master-1 → 跳过（避免影响 Leader 性能）          │
+│     Follower master-0: DB=1.8GB, latency=8ms                 │
+│     Follower master-2: DB=1.7GB, latency=6ms  ← 选择这个     │
+│                                                               │
+│  2. 执行快照:                                                 │
+│     $ etcdctl --endpoints=https://10.0.0.3:2379 \            │
+│         --cacert=/etc/etcd/tls/ca.crt \                      │
+│         --cert=/etc/etcd/tls/server.crt \                    │
+│         --key=/etc/etcd/tls/server.key \                     │
+│         snapshot save /var/lib/etcd-backup/pre-upgrade.db    │
+│                                                               │
+│     {"level":"info","msg":"snapshot saved","path":"..."}      │
+│                                                               │
+│  3. 校验快照:                                                 │
+│     $ etcdctl snapshot status pre-upgrade.db --write-out=json │
+│     {"revision":2847391,"totalKey":48291,"totalSize":1756360704} │
+│                                                               │
+│  4. 上传到 PVC:                                               │
+│     cp pre-upgrade.db /var/lib/etcd-backup/pvc/backup-20260420.db │
+│                                                               │
+│  5. 更新 Status:                                              │
+│     recentBackup:                                             │
+│       startTime: "2026-04-20T10:00:10Z"                      │
+│       completionTime: "2026-04-20T10:00:52Z"                 │
+│       snapshotSize: 1.7GB                                     │
+│                                                               │
+│  Result: BACKUP COMPLETE → 进入 Upgrading 阶段               │
+└──────────────────────────────────────────────────────────────┘
+```
+### T+0:00:55 — 确定升级顺序
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Determine Upgrade Order                                      │
+│                                                               │
+│  当前集群:                                                    │
+│    master-0: Follower, Healthy, v3.5.9                       │
+│    master-1: Leader,   Healthy, v3.5.9                       │
+│    master-2: Follower, Healthy, v3.5.9                       │
+│                                                               │
+│  策略: Leader 最后升级                                        │
+│                                                               │
+│  升级顺序: [master-0, master-2, master-1]                    │
+│             ↑ Follower  ↑ Follower  ↑ Leader(最后)           │
+└──────────────────────────────────────────────────────────────┘
+```
+### T+0:01:00 — 升级 Member #1: master-0 (Follower)
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Upgrading master-0 (10.0.0.1)                                │
+│                                                               │
+│  ── Step 1: 升级前集群健康确认 ──                             │
+│    $ etcdctl endpoint health --cluster                        │
+│    https://10.0.0.1:2379 is healthy: committed revision: 2847391 │
+│    https://10.0.0.2:2379 is healthy: committed revision: 2847391 │
+│    https://10.0.0.3:2379 is healthy: committed revision: 2847391 │
+│    ✓ 集群健康                                                 │
+│                                                               │
+│  ── Step 2: 记录回滚信息 ──                                   │
+│    保存当前 Manifest 到: /etc/kubernetes/etcd-manifest-backup/ │
+│      etcd-member-master-0.v3.5.9.yaml                        │
+│                                                               │
+│  ── Step 3: 更新 Static Pod Manifest ──                      │
+│                                                               │
+│    旧 Manifest:                                               │
+│      image: quay.io/openshift/etcd:v3.5.9                    │
+│                                                               │
+│    新 Manifest:                                               │
+│      image: quay.io/openshift/etcd:v3.5.11    ← 新版本       │
+│                                                               │
+│    写入: /etc/kubernetes/manifests/etcd-member-master-0.yaml  │
+│                                                               │
+│  ── Step 4: kubelet 检测到 Manifest 变更 ──                   │
+│    kubelet 在 <1s 内检测到文件变更                             │
+│    → 旧 Pod (v3.5.9) 被终止                                  │
+│    → 新 Pod (v3.5.11) 被创建                                 │
+│                                                               │
+│    Pod 事件:                                                  │
+│      Killing container etcd (id=abc123)                       │
+│      Creating container etcd with image v3.5.11              │
+│                                                               │
+│  ── Step 5: 等待 Pod 就绪 ──                                  │
+│    轮询间隔: 2s, 超时: 5min                                   │
+│                                                               │
+│    T+0:01:03  Pod Phase=Pending   (ContainerCreating)        │
+│    T+0:01:08  Pod Phase=Running   (Container Started)        │
+│    T+0:01:10  Pod Ready=True      (Readiness Probe Pass)     │
+│    ✓ Pod 就绪                                                 │
+│                                                               │
+│  ── Step 6: 等待 etcd member 恢复 ──                          │
+│    T+0:01:12  etcdctl endpoint health → "is healthy"         │
+│    T+0:01:12  etcdctl member list → master-0 状态: started   │
+│    T+0:01:13  getMemberVersion(master-0) → "3.5.11" ✓        │
+│                                                               │
+│  ── Step 7: 验证集群一致性 ──                                 │
+│    $ etcdctl endpoint health --cluster                        │
+│    https://10.0.0.1:2379 is healthy: v3.5.11  ← 已升级      │
+│    https://10.0.0.2:2379 is healthy: v3.5.9                  │
+│    https://10.0.0.3:2379 is healthy: v3.5.9                  │
+│    ✓ 集群仍有 quorum (3/3 healthy)                            │
+│                                                               │
+│  Result: master-0 升级成功 ✅                                 │
+│                                                               │
+│  当前状态:                                                    │
+│    master-0: v3.5.11 (Follower) ✅                            │
+│    master-1: v3.5.9  (Leader)                                │
+│    master-2: v3.5.9  (Follower)                              │
+└──────────────────────────────────────────────────────────────┘
+**关键时间点**：master-0 升级期间，etcd 集群仍有 master-1 + master-2 两个 v3.5.9 成员维持 quorum，客户端读写不受影响。
+### T+0:01:20 — 升级 Member #2: master-2 (Follower)
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Upgrading master-2 (10.0.0.3)                                │
+│                                                               │
+│  ── Step 1: 升级前集群健康确认 ──                             │
+│    $ etcdctl endpoint health --cluster                        │
+│    https://10.0.0.1:2379 is healthy: v3.5.11                 │
+│    https://10.0.0.2:2379 is healthy: v3.5.9                  │
+│    https://10.0.0.3:2379 is healthy: v3.5.9                  │
+│    ✓ 集群健康                                                 │
+│                                                               │
+│  ── Step 2: 记录回滚信息 ──                                   │
+│    保存: etcd-member-master-2.v3.5.9.yaml                    │
+│                                                               │
+│  ── Step 3: 更新 Static Pod Manifest ──                      │
+│    image: quay.io/openshift/etcd:v3.5.11                     │
+│    写入: /etc/kubernetes/manifests/etcd-member-master-2.yaml  │
+│                                                               │
+│  ── Step 4-7: 等待 Pod 就绪 + member 恢复 ──                 │
+│    T+0:01:23  Pod ContainerCreating                          │
+│    T+0:01:28  Pod Running                                     │
+│    T+0:01:30  Pod Ready=True                                  │
+│    T+0:01:32  etcd member healthy, version=3.5.11            │
+│                                                               │
+│    $ etcdctl endpoint health --cluster                        │
+│    https://10.0.0.1:2379 is healthy: v3.5.11                 │
+│    https://10.0.0.2:2379 is healthy: v3.5.9                  │
+│    https://10.0.0.3:2379 is healthy: v3.5.11  ← 已升级      │
+│    ✓ 集群仍有 quorum                                          │
+│                                                               │
+│  Result: master-2 升级成功 ✅                                 │
+│                                                               │
+│  当前状态:                                                    │
+│    master-0: v3.5.11 (Follower) ✅                            │
+│    master-1: v3.5.9  (Leader)    ← 最后一个                  │
+│    master-2: v3.5.11 (Follower) ✅                            │
+└──────────────────────────────────────────────────────────────┘
+```
+### T+0:01:40 — 升级 Member #3: master-1 (Leader) ⚠️ 关键步骤
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Upgrading master-1 (10.0.0.2) — Leader 节点                  │
+│                                                               │
+│  ⚠️ 这是 Leader 节点升级，需要特别关注                        │
+│                                                               │
+│  ── Step 1: 升级前集群健康确认 ──                             │
+│    $ etcdctl endpoint health --cluster                        │
+│    https://10.0.0.1:2379 is healthy: v3.5.11                 │
+│    https://10.0.0.2:2379 is healthy: v3.5.9                  │
+│    https://10.0.0.3:2379 is healthy: v3.5.11                 │
+│    ✓ 集群健康，2个成员已是新版本                               │
+│                                                               │
+│  ── Step 2: 记录回滚信息 ──                                   │
+│    保存: etcd-member-master-1.v3.5.9.yaml                    │
+│                                                               │
+│  ── Step 3: 更新 Static Pod Manifest ──                      │
+│    image: quay.io/openshift/etcd:v3.5.11                     │
+│    写入: /etc/kubernetes/manifests/etcd-member-master-1.yaml  │
+│                                                               │
+│  ── Step 4: Leader 停止 → 触发重新选举 ──                     │
+│                                                               │
+│    T+0:01:42  旧 Leader (master-1/v3.5.9) 停止               │
+│    T+0:01:42  ⚡ etcd 集群检测到 Leader 失联                  │
+│    T+0:01:42  触发 Leader 选举                                │
+│    T+0:01:43  master-0 (v3.5.11) 当选新 Leader               │
+│                                                               │
+│    选举期间影响:                                               │
+│      - 写请求短暂不可用（约 1-2 秒）                          │
+│      - 读请求不受影响（Follower 可服务线性一致性读）           │
+│                                                               │
+│  ── Step 5: 等待 Pod 就绪 ──                                  │
+│    T+0:01:45  Pod ContainerCreating                          │
+│    T+0:01:50  Pod Running                                     │
+│    T+0:01:52  Pod Ready=True                                  │
+│    T+0:01:54  etcd member healthy, version=3.5.11            │
+│                                                               │
+│  ── Step 6: 验证集群状态 ──                                   │
+│    $ etcdctl endpoint health --cluster                        │
+│    https://10.0.0.1:2379 is healthy: v3.5.11  ← 新 Leader   │
+│    https://10.0.0.2:2379 is healthy: v3.5.11  ← 已升级      │
+│    https://10.0.0.3:2379 is healthy: v3.5.11                 │
+│                                                               │
+│    $ etcdctl member list                                      │
+│    6e3bd: name=etcd-member-master-0 peerURLs=https://10.0.0.1:2380 clientURLs=https://10.0.0.1:2379 │
+│    af74d: name=etcd-member-master-1 peerURLs=https://10.0.0.2:2380 clientURLs=https://10.0.0.2:2379 │
+│    c2b91: name=etcd-member-master-2 peerURLs=https://10.0.0.3:2380 clientURLs=https://10.0.0.3:2379 │
+│                                                               │
+│    $ etcdctl endpoint status --cluster                        │
+│    https://10.0.0.1:2379, v3.5.11, 1.9GB, LEADER            │
+│    https://10.0.0.2:2379, v3.5.11, 1.8GB, FOLLOWER          │
+│    https://10.0.0.3:2379, v3.5.11, 1.7GB, FOLLOWER          │
+│                                                               │
+│  Result: master-1 升级成功 ✅                                 │
+│                                                               │
+│  当前状态:                                                    │
+│    master-0: v3.5.11 (Leader)  ✅                             │
+│    master-1: v3.5.11 (Follower) ✅                            │
+│    master-2: v3.5.11 (Follower) ✅                            │
+└──────────────────────────────────────────────────────────────┘
+```
+### T+0:02:00 — PostCheck 阶段
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Post-Upgrade Full Health Check                               │
+│                                                               │
+│  1. 所有 member 版本一致:                                     │
+│     master-0: v3.5.11 ✅                                     │
+│     master-1: v3.5.11 ✅                                     │
+│     master-2: v3.5.11 ✅                                     │
+│                                                               │
+│  2. 所有 member 健康:                                         │
+│     $ etcdctl endpoint health --cluster                       │
+│     3/3 healthy ✅                                            │
+│                                                               │
+│  3. Leader 存在:                                              │
+│     master-0 is LEADER ✅                                     │
+│                                                               │
+│  4. 数据一致性:                                               │
+│     $ etcdctl endpoint status --cluster                       │
+│     revision: master-0=2847420, master-1=2847420, master-2=2847420 │
+│     revision 一致 ✅                                          │
+│                                                               │
+│  5. 无活跃告警:                                               │
+│     $ etcdctl alarm list                                      │
+│     (empty) ✅                                                │
+│                                                               │
+│  6. API Server 连接正常:                                      │
+│     kube-apiserver etcd connection healthy ✅                  │
+│                                                               │
+│  Result: POST CHECK PASSED ✅                                 │
+└──────────────────────────────────────────────────────────────┘
+```
+### T+0:02:05 — 更新 Etcd CR Status
+```yaml
+apiVersion: operator.openshift.io/v1
+kind: Etcd
+metadata:
+  name: cluster
+status:
+  currentVersion: "3.5.11"       # ← 从 3.5.9 更新
+  desiredVersion: "3.5.11"
+  conditions:
+    - type: Available
+      status: "True"
+      reason: "EtcdAvailable"
+      message: "3 of 3 members are available"
+    - type: Progressing
+      status: "False"             # ← 升级完成
+      reason: "EtcdUpgradeCompleted"
+    - type: Degraded
+      status: "False"
+    - type: Upgradeable
+      status: "True"              # ← 通知 CVO 可以继续
+      message: "etcd is healthy, safe to proceed with other component upgrades"
+  members:
+    - id: 6e3bd
+      name: etcd-member-master-0
+      version: "3.5.11"
+      health: healthy
+      role: Leader
+    - id: af74d
+      name: etcd-member-master-1
+      version: "3.5.11"
+      health: healthy
+      role: Follower
+    - id: c2b91
+      name: etcd-member-master-2
+      version: "3.5.11"
+      health: healthy
+      role: Follower
+  recentBackup:
+    startTime: "2026-04-20T10:00:10Z"
+    completionTime: "2026-04-20T10:00:52Z"
+    snapshotSize: 1.7GB
+```
+### T+0:02:10 — CVO 继续升级下一个组件
+CVO 检测到 Etcd CR 的 `Upgradeable=True`，继续升级 kube-apiserver 等后续组件。
+## 完整时间线汇总
+```
+T+0:00:00  CVO 下发 Etcd CR desiredVersion=3.5.11
+T+0:00:05  Operator Reconcile 检测到版本差异
+T+0:00:05  PreCheck: 全部通过 ✅
+T+0:00:10  Backup: 快照保存成功 (1.7GB, 42s)
+T+0:00:55  确定升级顺序: [master-0, master-2, master-1]
+T+0:01:00  开始升级 master-0 (Follower)
+T+0:01:13  master-0 升级完成 ✅ (耗时 ~13s)
+T+0:01:20  开始升级 master-2 (Follower)
+T+0:01:32  master-2 升级完成 ✅ (耗时 ~12s)
+T+0:01:40  开始升级 master-1 (Leader) ⚠️
+T+0:01:42  Leader 选举: master-0 成为新 Leader (写中断 ~1s)
+T+0:01:54  master-1 升级完成 ✅ (耗时 ~14s)
+T+0:02:00  PostCheck: 全部通过 ✅
+T+0:02:05  更新 Etcd CR Status: currentVersion=3.5.11
+T+0:02:10  CVO 继续升级下一个组件
+
+总升级耗时: ~2 分 10 秒
+写不可用时间: ~1 秒 (Leader 选举期间)
+读不可用时间: 0 秒
+```
+## 异常场景样例：master-2 升级失败
+### 场景描述
+master-2 升级后 Pod 启动失败（例如磁盘 IO 错误导致 etcd 数据损坏），触发回滚。
+```
+T+0:01:20  开始升级 master-2 (Follower)
+T+0:01:23  更新 Manifest: image=v3.5.11
+T+0:01:25  Pod 启动 → CrashLoopBackOff
+T+0:01:30  Pod RestartCount=3
+T+0:01:35  Pod RestartCount=5
+T+0:01:40  等待超时 (5min 内 Pod 未 Ready)
+```
+### Operator 处理流程
+```
+┌──────────────────────────────────────────────────────────────┐
+│  升级失败处理流程                                              │
+│                                                               │
+│  1. 检测到 master-2 升级超时                                  │
+│     → Pod 未 Ready，etcdctl endpoint health 失败              │
+│                                                               │
+│  2. 进入 Rollback 阶段                                        │
+│                                                               │
+│     2a. 读取回滚信息:                                         │
+│         /etc/kubernetes/etcd-manifest-backup/                 │
+│           etcd-member-master-2.v3.5.9.yaml                   │
+│                                                               │
+│     2b. 回写旧版本 Manifest:                                  │
+│         image: quay.io/openshift/etcd:v3.5.9                 │
+│         写入: /etc/kubernetes/manifests/                      │
+│           etcd-member-master-2.yaml                           │
+│                                                               │
+│     2c. kubelet 重建 Pod (v3.5.9)                            │
+│                                                               │
+│     2d. 等待 Pod 就绪 + member 恢复                           │
+│         T+0:01:45  Pod Running (v3.5.9)                      │
+│         T+0:01:47  etcd member healthy (v3.5.9)              │
+│                                                               │
+│  3. 更新 Status:                                              │
+│     Degraded = True                                           │
+│     Upgradeable = False                                       │
+│     message: "upgrade rolled back: master-2 failed,           │
+│               reverted to v3.5.9"                             │
+│                                                               │
+│  4. CVO 看到 Upgradeable=False                                │
+│     → 暂停集群升级                                            │
+│     → 等待运维介入                                            │
+│                                                               │
+│  当前状态:                                                    │
+│    master-0: v3.5.11 (Follower) ✅                            │
+│    master-1: v3.5.9  (Leader)                                │
+│    master-2: v3.5.9  (Follower) ← 已回滚                     │
+│                                                               │
+│  ⚠️ 注意: 此时集群处于混合版本状态                           │
+│     etcd v3.5.x 支持混合版本运行（向后兼容）                  │
+│     但 Operator 会阻止进一步升级，直到问题解决                 │
+└──────────────────────────────────────────────────────────────┘
+```
+### 运维介入修复
+运维人员排查发现 master-2 磁盘 IO 异常:
+  1. 修复磁盘问题（如更换故障盘）
+  2. 手动触发 etcd 数据重建:
+     $ etcdctl member remove c2b91
+     $ rm -rf /var/lib/etcd/member
+     $ etcdctl member add etcd-member-master-2 \
+         --peer-urls=https://10.0.0.3:2380
+     $ 重启 etcd Pod → 从其他 member 同步数据
+
+  3. 确认 master-2 恢复健康:
+     $ etcdctl endpoint health --cluster
+     3/3 healthy ✅
+
+  4. Operator 检测到集群恢复:
+     Degraded → False
+     Upgradeable → True
+
+  5. Operator 自动重新发起升级:
+     master-2: v3.5.9 → v3.5.11 (这次成功了)
+     master-1: v3.5.9 → v3.5.11
+
+  6. 升级完成 ✅
+```
+## 与 CVO 协作的完整升级时序
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  OpenShift 4.14 → 4.15 升级时序（etcd 相关部分）                │
+│                                                                   │
+│  CVO                          Etcd Operator              etcd    │
+│   │                               │                       │      │
+│   │  1. 更新 Operator Deployment  │                       │      │
+│   │──────────────────────────────▶│                       │      │
+│   │                               │  2. Operator 重启     │      │
+│   │                               │                       │      │
+│   │  3. 更新 Etcd CR              │                       │      │
+│   │     desiredVersion=3.5.11     │                       │      │
+│   │──────────────────────────────▶│                       │      │
+│   │                               │                       │      │
+│   │                               │  4. PreCheck          │      │
+│   │                               │─────────────────────▶ │      │
+│   │                               │◀───── OK ─────────── │      │
+│   │                               │                       │      │
+│   │                               │  5. Backup            │      │
+│   │                               │─────────────────────▶ │      │
+│   │                               │◀─── snapshot OK ──── │      │
+│   │                               │                       │      │
+│   │                               │  6. Upgrade master-0  │      │
+│   │                               │────── Manifest ─────▶ │      │
+│   │                               │◀─── healthy ──────── │      │
+│   │                               │                       │      │
+│   │                               │  7. Upgrade master-2  │      │
+│   │                               │────── Manifest ─────▶ │      │
+│   │                               │◀─── healthy ──────── │      │
+│   │                               │                       │      │
+│   │                               │  8. Upgrade master-1  │      │
+│   │                               │────── Manifest ─────▶ │      │
+│   │                               │    ⚡ Leader 选举     │      │
+│   │                               │◀─── healthy ──────── │      │
+│   │                               │                       │      │
+│   │                               │  9. PostCheck         │      │
+│   │                               │─────────────────────▶ │      │
+│   │                               │◀───── OK ─────────── │      │
+│   │                               │                       │      │
+│   │  10. 读取 Etcd CR Status      │                       │      │
+│   │◀─── Upgradeable=True ────────│                       │      │
+│   │                               │                       │      │
+│   │  11. 继续升级 kube-apiserver  │                       │      │
+│   │                               │                       │      │
+└──────────────────────────────────────────────────────────────────┘
+```
+## 关键数据：升级过程中的 etcd 集群状态变化
+```
+时间轴          master-0       master-1       master-2       Quorum   Leader
+─────────────────────────────────────────────────────────────────────────────
+T+0:00:00       v3.5.9 ✅      v3.5.9 ✅      v3.5.9 ✅      3/3     master-1
+T+0:01:00       v3.5.9 ✅      v3.5.9 ✅      v3.5.9 ✅      3/3     master-1   ← 开始升级
+T+0:01:03       v3.5.9 ⏳      v3.5.9 ✅      v3.5.9 ✅      2/3     master-1   ← master-0 Pod 重启中
+T+0:01:13       v3.5.11 ✅     v3.5.9 ✅      v3.5.9 ✅      3/3     master-1
+T+0:01:23       v3.5.11 ✅     v3.5.9 ✅      v3.5.9 ⏳      2/3     master-1   ← master-2 Pod 重启中
+T+0:01:32       v3.5.11 ✅     v3.5.9 ✅      v3.5.11 ✅     3/3     master-1
+T+0:01:42       v3.5.11 ✅     v3.5.9 ⏳      v3.5.11 ✅     2/3     master-0   ← Leader 选举!
+T+0:01:54       v3.5.11 ✅     v3.5.11 ✅     v3.5.11 ✅     3/3     master-0   ← 升级完成
+
+图例: ✅=健康  ⏳=Pod重启中  ❌=不健康
+```
+**关键观察**：
+- 任何时刻都有至少 2/3 成员健康，**始终维持 quorum**
+- Leader 选举仅发生 1 次（升级 Leader 节点时），写中断约 1 秒
+- 整个升级过程对读请求完全透明
+
