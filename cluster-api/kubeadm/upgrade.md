@@ -31,7 +31,7 @@ controlPlaneEndpoint: "mycluster.example.com:6443"
 ```mermaid
 flowchart TD
     A[开始: 当前集群] --> B[准备 ClusterConfiguration 配置文件]
-    B --> C[在私有仓库准备镜像 (保持官方标签)]
+    B --> C[在私有仓库准备镜像-保持官方标签]
     C --> D[kubeadm upgrade apply <version> --config cluster-config.yaml]
     D --> E[覆盖 /etc/kubernetes/manifests 静态 Pod 清单]
     E --> F[拉取镜像并重启控制平面组件]
@@ -39,7 +39,7 @@ flowchart TD
     G -->|是| H[手动修改静态 Pod 清单镜像标签]
     G -->|否| I[升级完成]
     H --> I[升级完成]
-    I --> J[单独升级 kubelet/kubectl (包管理器)]
+    I --> J[单独升级 kubelet/kubectl-包管理器]
     J --> K[集群升级完成]
 ```
 ## ✅ 总结
