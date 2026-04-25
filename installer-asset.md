@@ -1,5 +1,7 @@
 # Asset
-          
+- [asset design](https://github.com/openshift/installer/blob/main/docs/design/assetgeneration.md)
+- [deep wiki asset](https://deepwiki.com/openshift/installer/1.1-asset-generation-system?utm_source=copilot.com)
+- [asset graph](https://github.com/openshift/installer/blob/main/docs/design/resource_dep.svg)
 # 基于openFuyao可扩展安装框架，整理完整的Asset清单及各自作用
 ## openFuyao Installer Asset清单
 ### 一、配置类Asset
