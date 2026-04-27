@@ -312,4 +312,54 @@ graph TD
 
 这样设计的好处是：**kubeadm 保证集群一致性，用户仍然保留灵活性**。  
 
+# kubelet.service
+在你安装 kubelet 包之后，系统会自动放置一个 **默认的 systemd 单元文件 `kubelet.service`**。这个文件非常简洁，只定义了 kubelet 服务的基本启动方式，不包含复杂的参数。  
+
+## 📑 默认 `kubelet.service` 文件内容示例
+在大多数 Linux 发行版（如 Ubuntu/Debian/CentOS）中，安装 kubelet 后的默认文件大致如下：
+
+```ini
+[Unit]
+Description=kubelet: The Kubernetes Node Agent
+Documentation=https://kubernetes.io/docs/home/
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/kubelet
+Restart=always
+StartLimitInterval=0
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## ⚙️ 文件说明
+- **[Unit] 部分**  
+  - `Description`：描述服务用途。  
+  - `Documentation`：指向官方文档。  
+  - `After=network.target`：确保网络启动后再启动 kubelet。  
+
+- **[Service] 部分**  
+  - `ExecStart=/usr/bin/kubelet`：只定义了最基本的启动命令，没有参数。  
+  - `Restart=always`：保证 kubelet 异常退出后自动重启。  
+  - `RestartSec=10`：重启间隔 10 秒。  
+  - `StartLimitInterval=0`：取消启动频率限制。  
+
+- **[Install] 部分**  
+  - `WantedBy=multi-user.target`：指定在多用户模式下启用。  
+
+## 📊 设计思路
+- **简洁性**：默认文件只负责启动 kubelet，不包含参数。  
+- **扩展性**：实际参数通过 drop-in 文件（如 `/etc/systemd/system/kubelet.service.d/10-kubeadm.conf`）和配置文件 `/var/lib/kubelet/config.yaml` 注入。  
+- **分层管理**：  
+  - 主单元文件 → 基础启动定义  
+  - drop-in 文件 → kubeadm 生成的参数和配置  
+  - config.yaml → kubelet 的详细运行参数  
+
+## ✅ 总结
+- 默认的 `kubelet.service` 文件内容非常简洁，只定义了服务的基本启动方式。  
+- 真正的参数和配置由 **drop-in 文件** 和 **config.yaml** 提供。  
+- 这种分层设计保证了：安装包提供基础服务定义，kubeadm 提供集群参数，用户可额外覆盖。  
+
 
