@@ -1,3 +1,48 @@
+# 升级containerd会中断业务吗？
+升级 **containerd** 是否会中断业务，关键在于它是 **节点上的容器运行时**。当你升级或重启 containerd 时，所有正在运行的容器都会受到影响。  
+## 📑 影响机制
+- **containerd 是 Pod 的运行时后端**：kubelet 通过 CRI 与 containerd 通信来创建和管理容器。  
+- **升级过程需要重启 containerd 服务**：  
+  - 一旦 containerd 重启，所有容器进程会被终止。  
+  - kubelet 会尝试重新拉起 Pod，但这意味着 Pod 会重启。  
+- **业务影响**：  
+  - 无状态应用（如 Web 服务）通常影响较小，Pod 重启后即可恢复。  
+  - 有状态应用（如数据库、消息队列）如果没有副本或持久卷，可能会出现短暂中断甚至数据丢失。  
+
+## ⚙️ 如何避免业务中断
+1. **提前 drain 节点**  
+   ```bash
+   kubectl drain <node> --ignore-daemonsets --delete-emptydir-data
+   ```
+   - 把 Pod 调度到其他节点，避免业务直接受影响。  
+
+2. **逐节点升级**  
+   - 一次只升级一个节点，避免集群整体不可用。  
+
+3. **升级 containerd**  
+   - 使用包管理器更新：  
+     ```bash
+     apt-get install -y containerd.io=<version>
+     systemctl restart containerd
+     ```  
+
+4. **恢复节点调度**  
+   ```bash
+   kubectl uncordon <node>
+   ```  
+
+5. **验证节点状态**  
+   ```bash
+   kubectl get nodes
+   kubectl get pods -o wide
+   ```
+   - 确认节点恢复为 Ready，Pod 正常运行。  
+
+## ✅ 总结
+- **直接升级 containerd**：会导致节点上所有 Pod 重启，业务可能中断。  
+- **正确操作（drain → 升级 → uncordon）**：可以避免业务中断，保证平滑升级。  
+- **最佳实践**：逐节点升级，提前 drain，确保关键应用有副本或高可用架构。  
+
 # containerd 升级的完备方案
 下面给你一个 **containerd 升级的完备方案**，涵盖设计思路、风险控制、操作步骤和流程图，确保升级过程安全、可控、可回滚。  
 
