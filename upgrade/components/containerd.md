@@ -107,7 +107,71 @@ state = "/run/containerd"
 ## ⚠️ 升级与迁移注意事项
 - **root 路径**：升级时必须保持一致或迁移，否则新版本找不到旧镜像。  
 - **state 路径**：升级后自动清空，无需迁移。  
-- **跨主机迁移**：需要复制 `root` 路径内容到新主机，并保持配置一致。  
+- **跨主机迁移**：需要复制 `root` 路径内容到新主机，并保持配置一致。
+
+# containerd 的 TLS SAN 配置
+在 **containerd 的 TLS SAN 配置**中，主要涉及的是它作为 **gRPC 服务端**时与客户端的通信场景。SAN（Subject Alternative Name）字段确保客户端在 TLS 握手时能正确验证服务端证书。具体来说，它用于以下几类服务端通信：
+
+## 📑 通信对象
+
+1. **本地 gRPC 客户端**  
+   - 例如：`ctr` 命令行工具、`crictl`、以及直接调用 containerd API 的客户端。  
+   - 这些工具通过 gRPC socket（如 `/run/containerd/containerd.sock` 或 TCP 地址）连接到 containerd。  
+   - SAN 必须包含客户端使用的域名或 IP，否则证书校验失败。
+
+2. **Kubelet → containerd**  
+   - 在 Kubernetes 集群中，kubelet 通过 CRI 插件与 containerd 通信。  
+   - 如果启用了 TLS，kubelet 会校验 containerd 的服务端证书。  
+   - SAN 需要覆盖 kubelet 连接时使用的地址（通常是本地 IP 或主机名）。
+
+3. **远程 API 客户端**  
+   - 在某些场景下，containerd 的 gRPC 服务可能通过 TCP 暴露给远程客户端。  
+   - 例如：跨主机管理工具、监控系统或自定义控制器。  
+   - SAN 必须包含这些远程访问的域名或 IP。
+
+4. **镜像仓库通信（间接场景）**  
+   - containerd 本身作为客户端去访问镜像仓库时，需要校验仓库的证书。  
+   - 这部分 SAN 配置在 **registry 的 hosts.toml** 中，而不是 containerd 主配置。  
+   - 用于确保 containerd 拉取镜像时能正确验证仓库服务端。
+
+## ⚠️ 注意事项
+- 如果客户端通过 **域名**连接，SAN 必须包含该域名。  
+- 如果客户端通过 **IP**连接，SAN 必须包含该 IP。  
+- 否则会报错：`x509: certificate is not valid for any names`。  
+- 修改 SAN 后需重新生成证书，并重启 containerd。  
+
+## ✅ 总结
+- **TLS SAN 在 containerd 中主要用于 gRPC 服务端证书校验**。  
+- 通信对象包括：本地工具（ctr/crictl）、Kubelet、远程 API 客户端。  
+- 镜像仓库的 TLS 校验属于另一套配置（hosts.toml），不依赖 containerd 主配置的 SAN。  
+
+# 通信链路图
+展示 containerd 与 ctr/kubelet/远程客户端的 TLS 交互，以及与镜像仓库的 TLS 校验关系：
+```mermaid
+flowchart TD
+    subgraph Local
+        CTR[ctr / crictl 客户端] -->|TLS gRPC| CONTAINERD[containerd gRPC 服务端]
+        KUBELET[Kubelet] -->|TLS gRPC-CRI| CONTAINERD
+        REMOTE[远程 API 客户端] -->|TLS gRPC| CONTAINERD
+    end
+
+    subgraph Registry
+        CONTAINERD -->|TLS HTTPS| REGISTRY[镜像仓库-Registry]
+    end
+
+    CONTAINERD:::server
+```
+
+## 📑 图解说明
+- **ctr / crictl 客户端**：通过 gRPC socket 或 TCP 与 containerd 通信，使用 TLS 校验 SAN。  
+- **Kubelet**：在 Kubernetes 集群中通过 CRI 与 containerd 通信，TLS 校验 SAN。  
+- **远程 API 客户端**：如果 containerd 暴露 TCP 接口，远程客户端也会通过 TLS 校验 SAN。  
+- **Registry 镜像仓库**：containerd 作为客户端访问镜像仓库时，使用 `hosts.toml` 配置进行 TLS 校验（CA、客户端证书），这里的 SAN 校验属于仓库证书，而不是 containerd 主配置。  
+
+## ✅ 总结
+- **TLS SAN 在 containerd 主配置中主要用于 gRPC 服务端通信**（ctr、crictl、kubelet、远程客户端）。  
+- **镜像仓库的 TLS 校验**通过 `hosts.toml` 完成，属于另一套机制。  
+- 两者结合，保证 containerd 在本地 API 通信和远程镜像拉取时都能安全运行。  
 
 ## ✅ 总结
 - **root**：持久化数据目录，必须保留或迁移。  
