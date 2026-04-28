@@ -120,3 +120,51 @@ metadata:
 - `cluster.x-k8s.io/paused` 是 Cluster API 的 **暂停开关**。  
 - 加上该注解后，控制器停止调谐，避免自动修改资源。  
 - 常用于 **手动维护、升级迁移、问题排查** 等场景。  
+
+# `cluster.x-k8s.io/delete-machine` 
+是 **Cluster API 中的一个特殊注解**，它的作用是：  
+
+## 📑 功能说明
+- **对象范围**：通常加在 `Machine` 资源上。  
+- **作用**：当该注解存在时，Cluster API 的控制器会在调谐过程中删除对应的 `Machine` 对象。  
+- **典型用途**：  
+  - 手动触发某个节点的删除，而不需要直接执行 `kubectl delete machine`。  
+  - 在某些自动化场景中，外部系统可以通过打上该注解来请求 Cluster API 删除机器。  
+
+## ⚙️ 使用示例
+```yaml
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Machine
+metadata:
+  name: worker-1
+  annotations:
+    cluster.x-k8s.io/delete-machine: "true"
+```
+
+一旦该注解被添加，Cluster API 控制器会识别并删除 `worker-1` 这台机器。  
+
+## 📊 注意事项
+- **不可逆**：一旦控制器执行删除，该节点上的 Pod 会被驱逐，节点资源会被释放。  
+- **替代方式**：如果只想临时停止调谐，应使用 `cluster.x-k8s.io/paused`，而不是 `delete-machine`。  
+- **自动化场景**：常用于外部系统或脚本批量管理节点时，避免直接调用 API 删除。  
+
+✅ 总结：`cluster.x-k8s.io/delete-machine` 是一个 **触发删除的注解**，加在 Machine 上后，Cluster API 控制器会自动删除该机器及其对应的节点资源。它是比直接 `kubectl delete` 更安全、可编排的删除方式。  
+
+# Cluster API 特殊注解速查对比表
+把 `paused`、`delete-machine`、`skip-remediation` 等常用注解的作用和使用场景并列展示，方便快速查阅：  
+
+## 📊 注解对比表
+
+| 注解 | 作用 | 使用场景 | 注意事项 |
+|------|------|----------|----------|
+| **`cluster.x-k8s.io/paused`** | 暂停对象的调谐（reconcile），控制器不再自动修改资源 | 手动维护、调试、升级或迁移时，避免控制器覆盖人工修改 | 必须记得移除，否则资源不会再被调谐，可能导致配置长期不一致 |
+| **`cluster.x-k8s.io/delete-machine`** | 标记某个 Machine 资源需要删除，控制器会自动执行删除操作 | 手动触发节点删除，或外部系统通过注解请求删除机器 | 删除不可逆，节点上的 Pod 会被驱逐，需确保业务有冗余 |
+| **`skip-remediation`** | 跳过机器的自动修复逻辑（MachineHealthCheck 不会触发修复） | 某些节点临时异常但不希望自动替换时使用 | 长期跳过可能导致集群存在不可用节点，需人工干预 |
+| **`remediate-machine`** | 标记某个 Machine 需要修复，控制器会执行修复逻辑 | 手动触发机器修复，而不是等待健康检查自动发现 | 修复逻辑可能导致节点重建，需确认业务影响 |
+| **`externally-managed`** | 声明对象由外部系统管理，Cluster API 不再调谐该对象 | 与外部系统（如云厂商或自定义控制器）协同管理资源时使用 | 确保外部系统能正确维护，否则可能导致资源漂移 |
+
+## ✅ 总结
+- **暂停类**：`paused` → 停止调谐，适合维护和升级。  
+- **删除类**：`delete-machine` → 触发删除，适合节点下线。  
+- **修复类**：`skip-remediation` / `remediate-machine` → 控制机器健康检查的修复行为。  
+- **外部管理类**：`externally-managed` → 声明由外部系统负责，避免 Cluster API 干预。  
