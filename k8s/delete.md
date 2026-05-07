@@ -67,3 +67,51 @@ sequenceDiagram
 ### 📊 总结
 - 删除流程是 **用户请求 → Finalizer 阻塞 → 控制器清理 → Finalizer 移除 → API Server 真正删除 → 垃圾回收器级联处理**。  
 - **安装与升级的依赖顺序一致性**和 **CR 删除逻辑**一样，都是围绕依赖链和控制器驱动的声明式流程。  
+
+# 检查 Finalizers 列表,是如何找到控制器的？
+在 Kubernetes 中，**Finalizers 并不会直接“找到”控制器**，而是通过一种约定机制让控制器自己来发现和处理。逻辑如下：
+## 📌 Finalizer 的工作机制
+- **Finalizer 是一个字符串标识**：例如 `"example.com/finalizer"`。  
+- **API Server 行为**：当对象带有 Finalizer 时，API Server 在删除时只会设置 `deletionTimestamp`，不会真正删除对象。  
+- **控制器发现**：控制器在监听该 CR 时，会看到对象进入删除流程（`deletionTimestamp` 已设置）。  
+- **匹配逻辑**：控制器代码里通常会检查对象的 `metadata.finalizers` 列表，如果包含自己负责的标识（如 `"example.com/finalizer"`），就执行清理逻辑。  
+- **完成清理**：控制器清理完外部资源后，主动移除该 Finalizer。  
+- **最终删除**：当所有 Finalizer 都被移除，API Server 才真正删除对象。
+## 🔑 关键点
+- Finalizer 本质上是一个 **约定字符串**，不是 API Server 去“找”控制器，而是控制器自己通过监听和匹配来发现。  
+- 控制器必须事先在代码里声明并处理对应的 Finalizer 名称。  
+- 这种机制保证了删除流程的可扩展性：不同控制器可以通过不同 Finalizer 名称来实现自定义清理逻辑。  
+## 📊 总结
+- **Finalizer 是标识，不是指针**。  
+- **控制器通过监听 CR 并匹配 Finalizer 名称来触发清理逻辑**。  
+- **API Server 只负责阻塞删除，真正的清理由控制器完成**。  
+## 时序图
+直观展示对象删除时 API Server 设置 `deletionTimestamp`，控制器发现 Finalizer 并执行清理，最后移除 Finalizer 的完整交互过程：
+```mermaid
+sequenceDiagram
+    participant User as 用户
+    participant APIServer as API Server
+    participant Controller as 控制器-Operator
+    participant Finalizer as Finalizer 标识
+
+    User->>APIServer: kubectl delete CR
+    APIServer->>APIServer: 设置 deletionTimestamp
+    APIServer->>Finalizer: 检查 Finalizers 列表
+
+    alt 存在 Finalizer
+        APIServer->>Controller: 通知对象进入删除流程
+        Controller->>Controller: 执行清理逻辑-释放外部资源
+        Controller->>Finalizer: 移除 Finalizer 标识
+        Finalizer->>APIServer: Finalizer 列表为空
+    end
+
+    APIServer->>APIServer: 真正删除对象-从 etcd 移除
+```
+### 🔑 图解说明
+- **用户请求**：通过 `kubectl delete` 发起删除。  
+- **API Server**：设置 `deletionTimestamp`，检查对象是否有 Finalizer。  
+- **Finalizer**：如果存在，阻塞删除。  
+- **控制器**：监听到对象进入删除流程，执行清理逻辑，完成后移除 Finalizer。  
+- **最终删除**：当 Finalizer 列表为空时，API Server 才真正删除对象。  
+
+👉 总结：**Finalizer 是一种约定机制**，API Server 不会直接“找到”控制器，而是由控制器监听 CR 并匹配 Finalizer 名称，主动执行清理逻辑并移除 Finalizer，最终由 API Server 完成删除。  
