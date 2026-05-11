@@ -255,7 +255,115 @@ for {
 - **完整实现**：完整实现了 Infrastructure Provider 接口
 
 这种协同设计使得 Cluster API 可以支持多种基础设施（AWS、Azure、GCP、vSphere、Docker 等），同时保持核心编排逻辑的一致性。
-        
+
+# DockerMachine
+**在 KubeadmControlPlane Controller 的流程中，先创建的是 Machine 资源，然后 Machine 的 `infrastructureRef` 指向 DockerMachine，DockerMachine 再由 DockerMachine Controller 进行实际容器节点的创建。** 换句话说，Machine 是入口，DockerMachine 是它的基础设施实现，两者是顺序衔接的。  [github.com](https://github.com/javadoors/openshift-dev-guide/blob/main/cluster-api/docker-impl.md)
+## 📌 详细流程拆解
+1. **Cluster Controller 阶段**
+   - 用户创建 `Cluster` CR。
+   - Cluster Controller 解析 `infrastructureRef` → 创建 `DockerCluster`。
+   - DockerCluster Controller 创建网络、负载均衡容器，并更新状态。
+2. **ControlPlane 阶段**
+   - Cluster Controller 解析 `controlPlaneRef` → 创建 `KubeadmControlPlane`。
+   - KubeadmControlPlane Controller 根据副本数（replicas）创建多个 **Machine** 资源。
+3. **Machine 与 DockerMachine 的关系**
+   - 每个 Machine 的 `spec.infrastructureRef` 指向一个 `DockerMachine`。
+   - **先创建 Machine，再创建 DockerMachine**：Machine Controller 监听 Machine，发现其 `infrastructureRef`，于是触发 DockerMachine 的创建。
+4. **DockerMachine Controller 执行**
+   - 监听到新的 DockerMachine 资源。
+   - 执行以下操作：
+     - 创建对应的 Docker 容器作为节点。
+     - 执行 bootstrap 脚本（来自 KubeadmConfig）。
+     - 安装 Kubernetes 组件。
+     - 更新 DockerMachine 的 `Status`（Ready、ProviderID、Addresses）。
+5. **Machine Controller 完成收尾**
+   - 监听到 DockerMachine 状态更新。
+   - 将节点加入集群，更新 Machine 的 `Status.NodeRef`。
+   - 最终 Machine 与 DockerMachine 状态一致，集群控制平面节点就绪。
+## 🔑 总结
+- **顺序**：Machine → DockerMachine → Docker 容器节点。  
+- **职责分离**：Machine 是抽象的逻辑资源，DockerMachine 是具体的基础设施实现。  
+- **控制器协作**：KubeadmControlPlane Controller 创建 Machine，Machine Controller 负责关联 DockerMachine，DockerMachine Controller 执行实际容器操作。  
+
+这种设计保证了 **Cluster API Core Controllers** 与 **Provider Controllers (CAPD)** 的解耦：前者只负责编排逻辑，后者负责平台实现。  
+
+# 详细的 YAML 样例和案例详解。  
+## 📊 Cluster → KubeadmControlPlane → Machine → DockerMachine → 容器节点 流程图 (Mermaid)
+```mermaid
+flowchart TD
+    A[Cluster CR] --> B[KubeadmControlPlane Controller]
+    B --> C[Machine CR]
+    C --> D[DockerMachine CR]
+    D --> E[DockerMachine Controller]
+    E --> F[容器节点 (Docker)]
+```
+
+**说明：**
+- **Cluster CR**：定义集群，包含 `infrastructureRef` 和 `controlPlaneRef`。
+- **KubeadmControlPlane Controller**：根据副本数创建多个 Machine。
+- **Machine CR**：抽象的节点资源，`infrastructureRef` 指向 DockerMachine。
+- **DockerMachine CR**：具体的基础设施实现。
+- **DockerMachine Controller**：创建 Docker 容器，运行 kubeadm 初始化。
+- **容器节点**：最终形成的 Kubernetes 节点。
+## 📝 YAML 样例
+```yaml
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Cluster
+metadata:
+  name: demo-cluster
+spec:
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+    kind: DockerCluster
+    name: demo-cluster-docker
+  controlPlaneRef:
+    apiVersion: controlplane.cluster.x-k8s.io/v1beta1
+    kind: KubeadmControlPlane
+    name: demo-control-plane
+
+---
+apiVersion: controlplane.cluster.x-k8s.io/v1beta1
+kind: KubeadmControlPlane
+metadata:
+  name: demo-control-plane
+spec:
+  replicas: 3
+  version: v1.29.0
+  infrastructureTemplate:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+    kind: DockerMachineTemplate
+    name: demo-control-plane-template
+  kubeadmConfigSpec:
+    clusterConfiguration:
+      apiServer:
+        extraArgs:
+          authorization-mode: Node,RBAC
+    initConfiguration:
+      nodeRegistration:
+        kubeletExtraArgs:
+          cloud-provider: docker
+
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta1
+kind: DockerMachineTemplate
+metadata:
+  name: demo-control-plane-template
+spec:
+  template:
+    spec: {}
+```
+## 📖 案例详解
+1. **Cluster**：用户创建 `Cluster`，指定 `DockerCluster` 和 `KubeadmControlPlane`。  
+2. **DockerCluster**：由 DockerCluster Controller 创建网络和负载均衡容器。  
+3. **KubeadmControlPlane**：定义副本数为 3，Controller 创建 3 个 Machine。  
+4. **Machine**：每个 Machine 的 `infrastructureRef` 指向 `DockerMachineTemplate`。  
+5. **DockerMachine**：DockerMachine Controller 根据模板创建 3 个 Docker 容器。  
+6. **容器节点**：每个容器运行 kubeadm 初始化，最终形成 3 节点的控制平面集群。  
+### 🌟 总结
+- **顺序**：先创建 Machine，再由 Machine 的 `infrastructureRef` 驱动 DockerMachine 的创建，最终落地为容器节点。  
+- **职责分离**：Machine 是抽象的逻辑资源，DockerMachine 是具体的基础设施实现。  
+- **控制器协作**：KubeadmControlPlane Controller 创建 Machine，Machine Controller 负责关联 DockerMachine，DockerMachine Controller 执行实际容器操作。  
+
 # Cluster API 官方实现样例代码解析思路
 ## 一、Cluster API 核心概念
 ### 1.1 架构组件
