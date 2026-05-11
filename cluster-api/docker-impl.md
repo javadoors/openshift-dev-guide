@@ -295,7 +295,7 @@ flowchart TD
     B --> C[Machine CR]
     C --> D[DockerMachine CR]
     D --> E[DockerMachine Controller]
-    E --> F[容器节点 (Docker)]
+    E --> F[容器节点-Docker]
 ```
 
 **说明：**
