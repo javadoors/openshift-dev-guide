@@ -1,3 +1,33 @@
+# CAPI
+
+**Cluster API (CAPI) 的核心功能是提供一个声明式、可扩展的框架，用于自动化 Kubernetes 集群的生命周期管理，包括创建、扩缩容、升级和删除。它让集群像 Pod 一样通过 CRD 管理，支持多云和混合环境。**  
+
+## 🧩 核心功能
+- **集群创建**：通过 `Cluster` CRD 定义集群，自动化生成控制平面和工作节点。  
+- **节点管理**：使用 `Machine`、`MachineSet`、`MachineDeployment` 管理单节点或节点组，支持扩缩容和滚动升级。  
+- **控制平面管理**：通过 `KubeadmControlPlane` 等 CRD 管理控制平面节点的初始化、扩缩容和升级。  
+- **引导配置**：使用 `BootstrapConfig`（如 kubeadm）为节点生成初始化脚本，确保节点能加入集群。  
+- **基础设施抽象**：通过 Provider（AWS、Azure、vSphere、Bare Metal、CAPD 等）统一管理底层资源。  
+- **升级与迁移**：支持集群版本升级、组件更新和跨云迁移。  
+- **健康检查**：提供 `MachineHealthCheck`，自动检测和修复异常节点。  
+- **多集群管理**：在一个管理集群中统一管理多个目标集群，适合大规模场景。  
+- **GitOps 集成**：结合 ArgoCD/Flux 等工具，实现声明式、可审计的集群管理。  
+
+## 📊 功能对照表
+| **功能模块** | **对应 CRD/组件** | **作用** |
+|--------------|------------------|----------|
+| 集群生命周期 | `Cluster` | 定义和管理集群整体 |
+| 节点管理 | `Machine`, `MachineSet`, `MachineDeployment` | 管理单节点和节点组 |
+| 控制平面 | `KubeadmControlPlane` | 管理控制平面节点 |
+| 引导配置 | `BootstrapConfig`, `KubeadmConfig` | 节点初始化配置 |
+| 基础设施 | Provider (AWS, Azure, CAPD 等) | 管理底层资源 |
+| 健康检查 | `MachineHealthCheck` | 自动检测和修复节点 |
+| 多集群管理 | 管理集群 + clusterctl | 统一管理多个目标集群 |
+
+## ⚠️ 使用价值与挑战
+- **价值**：跨云统一、声明式管理、自动化升级、可扩展 Provider。  
+- **挑战**：对托管 Kubernetes（如 AKS、EKS）的支持仍在完善；需要较高的 Kubernetes Operator 经验来扩展。  [The Cluster API Book](https://cluster-api.sigs.k8s.io/)  [腾讯云](https://cloud.tencent.com/developer/article/2402106)  [知乎专栏](https://zhuanlan.zhihu.com/p/437032698)  
+
 # CAPD 的完整架构图
 把所有控制器都包含进去。Cluster API 的控制器主要包括：  
 - **Cluster Controller**：负责集群对象的生命周期。  
