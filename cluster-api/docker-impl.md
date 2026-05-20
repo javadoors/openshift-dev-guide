@@ -36,6 +36,32 @@ flowchart LR
     E --> J & K
     H & I --> J & K & L
 ```
+
+```mermaid
+flowchart LR
+    subgraph 管理集群[管理集群 (Management Cluster)]
+        A[Cluster API 控制器]
+        A --> B[Bootstrap Provider (kubeadm)]
+        A --> C[CAPD 基础设施提供者]
+        A --> D[Cluster / Machine CRD]
+    end
+
+    subgraph CAPD[CAPD 基础设施提供者 (Docker)]
+        E[DockerCluster CRD]
+        F[DockerMachine CRD]
+    end
+
+    subgraph 目标集群[目标 Kubernetes 集群 (Target Cluster)]
+        G[Control Plane 容器]
+        H[Worker Node 容器]
+        I[Load Balancer 容器]
+    end
+
+    D -->|Reconcile| E & F
+    C --> E & F
+    B --> G & H
+    E & F --> G & H & I
+```
 ## 🧩 架构说明
 - **管理集群**：运行所有 Cluster API 控制器，负责监听 CRD 并触发 Reconcile。  
 - **CAPD 基础设施提供者**：通过 `DockerCluster` 和 `DockerMachine` CRD 管理 Docker 容器资源。  
