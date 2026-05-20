@@ -1,4 +1,45 @@
-         
+# *Cluster API CAPD 完整架构图
+展示了管理集群、CAPD 基础设施提供者、Bootstrap Provider 以及目标集群之间的关系：  
+
+```mermaid
+flowchart LR
+    subgraph 管理集群[管理集群-Management Cluster]
+        A[Cluster API 控制器]
+        A --> B[Bootstrap Provider-kubeadm]
+        A --> C[CAPD 基础设施提供者]
+        A --> D[Cluster / Machine CRD]
+    end
+
+    subgraph CAPD[CAPD 基础设施提供者-Docker]
+        E[DockerCluster CRD]
+        F[DockerMachine CRD]
+    end
+
+    subgraph 目标集群[目标 Kubernetes 集群-Target Cluster]
+        G[Control Plane 容器]
+        H[Worker Node 容器]
+        I[Load Balancer 容器]
+    end
+
+    D -->|Reconcile| E & F
+    C --> E & F
+    B --> G & H
+    E & F --> G & H & I
+```
+
+## 🧩 架构说明
+- **管理集群**：运行 Cluster API 控制器，负责监听 CRD 并触发 Reconcile。  
+- **CAPD 基础设施提供者**：通过 `DockerCluster` 和 `DockerMachine` CRD 管理 Docker 容器资源。  
+- **Bootstrap Provider**：如 kubeadm，负责节点初始化。  
+- **目标集群**：由 Docker 容器组成的 Kubernetes 集群，包括控制平面、工作节点和负载均衡器。  
+
+## 🔄 工作流程
+1. 用户在管理集群中提交 `Cluster` 和 `Machine` CRD。  
+2. Cluster API 控制器调用 CAPD Provider，生成 `DockerCluster` 和 `DockerMachine`。  
+3. CAPD 在 Docker 环境中创建容器节点。  
+4. Bootstrap Provider 初始化节点，形成 Kubernetes 集群。  
+5. 最终得到一个运行在 Docker 容器中的完整目标集群。  
+   
 # 我来详细解析Cluster API Core Controllers 与 CAPD (Docker Provider) 控制器之间的协同关系
 ## 一、整体架构概览
 ### 1.1 Cluster API 分层架构
