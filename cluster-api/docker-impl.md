@@ -1,45 +1,74 @@
-# *Cluster API CAPD 完整架构图
-展示了管理集群、CAPD 基础设施提供者、Bootstrap Provider 以及目标集群之间的关系：  
+# CAPD 的完整架构图
+把所有控制器都包含进去。Cluster API 的控制器主要包括：  
+- **Cluster Controller**：负责集群对象的生命周期。  
+- **Machine Controller**：负责节点对象的生命周期。  
+- **MachineSet Controller**：负责节点组的扩缩容。  
+- **MachineDeployment Controller**：负责节点组的滚动升级。  
+- **Bootstrap Controller**：负责节点初始化（如 kubeadm）。  
+- **Infrastructure Controller**：负责底层资源（CAPD 的 DockerCluster、DockerMachine）。  
 
+## 📊 CAPD 完整架构图 
 ```mermaid
 flowchart LR
     subgraph 管理集群[管理集群-Management Cluster]
-        A[Cluster API 控制器]
-        A --> B[Bootstrap Provider-kubeadm]
-        A --> C[CAPD 基础设施提供者]
-        A --> D[Cluster / Machine CRD]
+        A[Cluster Controller]
+        B[Machine Controller]
+        C[MachineSet Controller]
+        D[MachineDeployment Controller]
+        E[Bootstrap Controller]
+        F[Infrastructure Controller-CAPD]
+        G[Cluster / Machine / MachineSet / MachineDeployment CRD]
     end
 
     subgraph CAPD[CAPD 基础设施提供者-Docker]
-        E[DockerCluster CRD]
-        F[DockerMachine CRD]
+        H[DockerCluster CRD]
+        I[DockerMachine CRD]
     end
 
     subgraph 目标集群[目标 Kubernetes 集群-Target Cluster]
-        G[Control Plane 容器]
-        H[Worker Node 容器]
-        I[Load Balancer 容器]
+        J[Control Plane 容器]
+        K[Worker Node 容器]
+        L[Load Balancer 容器]
     end
 
-    D -->|Reconcile| E & F
-    C --> E & F
-    B --> G & H
-    E & F --> G & H & I
+    G -->|Reconcile| A & B & C & D & E & F
+    F --> H & I
+    E --> J & K
+    H & I --> J & K & L
 ```
-
 ## 🧩 架构说明
-- **管理集群**：运行 Cluster API 控制器，负责监听 CRD 并触发 Reconcile。  
+- **管理集群**：运行所有 Cluster API 控制器，负责监听 CRD 并触发 Reconcile。  
 - **CAPD 基础设施提供者**：通过 `DockerCluster` 和 `DockerMachine` CRD 管理 Docker 容器资源。  
 - **Bootstrap Provider**：如 kubeadm，负责节点初始化。  
 - **目标集群**：由 Docker 容器组成的 Kubernetes 集群，包括控制平面、工作节点和负载均衡器。  
-
 ## 🔄 工作流程
 1. 用户在管理集群中提交 `Cluster` 和 `Machine` CRD。  
 2. Cluster API 控制器调用 CAPD Provider，生成 `DockerCluster` 和 `DockerMachine`。  
 3. CAPD 在 Docker 环境中创建容器节点。  
 4. Bootstrap Provider 初始化节点，形成 Kubernetes 集群。  
-5. 最终得到一个运行在 Docker 容器中的完整目标集群。  
-   
+5. 最终得到一个运行在 Docker 容器中的完整目标集群。
+
+# Cluster API 控制器职责对照表
+涵盖了 CAPD 架构中涉及的所有核心控制器及其对应的 CRD：  
+
+## 📊 控制器职责对照表
+
+| **控制器名称** | **管理的 CRD** | **主要职责** |
+|----------------|----------------|--------------|
+| **Cluster Controller** | `Cluster` | 管理集群对象的生命周期，包括创建、更新和删除集群。 |
+| **Machine Controller** | `Machine` | 管理单个节点的生命周期，确保节点状态与声明一致。 |
+| **MachineSet Controller** | `MachineSet` | 管理一组节点的扩缩容，类似于 ReplicaSet 的概念。 |
+| **MachineDeployment Controller** | `MachineDeployment` | 管理节点组的滚动升级和版本控制，类似于 Deployment。 |
+| **Bootstrap Controller** | `BootstrapConfig` | 负责节点初始化（如 kubeadm 配置），确保节点能加入集群。 |
+| **Infrastructure Controller** | `DockerCluster`, `DockerMachine` (CAPD) | 管理底层资源的创建与销毁，在 CAPD 中就是 Docker 容器。 |
+
+## 🔄 总结
+- **Cluster/Machine 系列控制器**：负责集群和节点的生命周期管理。  
+- **MachineSet/MachineDeployment 控制器**：负责节点组的扩缩容与升级。  
+- **Bootstrap Controller**：负责节点初始化。  
+- **Infrastructure Controller (CAPD)**：负责底层 Docker 容器资源的管理。  
+
+
 # 我来详细解析Cluster API Core Controllers 与 CAPD (Docker Provider) 控制器之间的协同关系
 ## 一、整体架构概览
 ### 1.1 Cluster API 分层架构
