@@ -39,19 +39,19 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    subgraph 管理集群[管理集群 (Management Cluster)]
+    subgraph 管理集群[管理集群-Management Cluster]
         A[Cluster API 控制器]
-        A --> B[Bootstrap Provider (kubeadm)]
+        A --> B[Bootstrap Provider-kubeadm]
         A --> C[CAPD 基础设施提供者]
-        A --> D[Cluster / Machine CRD]
+        A --> D[Cluster/Machine CRD]
     end
 
-    subgraph CAPD[CAPD 基础设施提供者 (Docker)]
+    subgraph CAPD[CAPD 基础设施提供者-Docker]
         E[DockerCluster CRD]
         F[DockerMachine CRD]
     end
 
-    subgraph 目标集群[目标 Kubernetes 集群 (Target Cluster)]
+    subgraph 目标集群[目标 Kubernetes 集群-Target Cluster]
         G[Control Plane 容器]
         H[Worker Node 容器]
         I[Load Balancer 容器]
