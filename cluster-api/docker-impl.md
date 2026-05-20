@@ -94,6 +94,53 @@ flowchart LR
 - **Bootstrap Controller**：负责节点初始化。  
 - **Infrastructure Controller (CAPD)**：负责底层 Docker 容器资源的管理。  
 
+# KubeadmControlPlane 
+在 **Cluster API** 架构中，`KubeadmControlPlane` 是一个 **控制平面专用的 CRD 和控制器**，它属于 **Bootstrap Provider** 的一部分，但在架构图里需要单独体现，因为它直接管理控制平面节点的生命周期。  
+## 🧩 KubeadmControlPlane 的角色
+- **CRD**：`KubeadmControlPlane`  
+- **控制器职责**：  
+  - 管理控制平面节点的创建、扩缩容和滚动升级。  
+  - 使用 **kubeadm** 完成控制平面节点的初始化和配置。  
+  - 确保控制平面节点始终满足声明式配置（如副本数、版本）。  
+## 📊 在 CAPD 架构图中的体现
+在之前的 CAPD 架构图中，`KubeadmControlPlane` 应该放在 **Bootstrap Provider** 下，作为一个独立的控制器和 CRD，连接到目标集群的 **Control Plane 容器**。  
+```mermaid
+flowchart LR
+    subgraph 管理集群[管理集群-Management Cluster]
+        A[Cluster Controller]
+        B[Machine Controller]
+        C[MachineSet Controller]
+        D[MachineDeployment Controller]
+        E[Bootstrap Controller]
+        F[Infrastructure Controller-CAPD]
+        G[Cluster / Machine / MachineSet / MachineDeployment CRD]
+        H[KubeadmControlPlane Controller]
+        I[KubeadmControlPlane CRD]
+    end
+
+    subgraph CAPD[CAPD 基础设施提供者-Docker]
+        J[DockerCluster CRD]
+        K[DockerMachine CRD]
+    end
+
+    subgraph 目标集群[目标 Kubernetes 集群-Target Cluster]
+        L[Control Plane 容器]
+        M[Worker Node 容器]
+        N[Load Balancer 容器]
+    end
+
+    G -->|Reconcile| A & B & C & D & E & F & H
+    F --> J & K
+    H --> I
+    I --> L
+    E --> M
+    J & K --> L & M & N
+```
+## 🔄 总结
+- `KubeadmControlPlane` 是 **控制平面专用的 CRD 和控制器**。  
+- 在 CAPD 架构图中，它应当位于 **Bootstrap Provider** 下，直接管理 **Control Plane 容器**。  
+- 它与 `DockerCluster`、`DockerMachine` 协作，确保控制平面节点的声明式管理和滚动升级。  
+
 
 # 我来详细解析Cluster API Core Controllers 与 CAPD (Docker Provider) 控制器之间的协同关系
 ## 一、整体架构概览
