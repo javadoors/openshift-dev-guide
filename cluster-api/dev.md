@@ -2632,7 +2632,7 @@ kubectl logs -f deployment/capbke-controller-manager -n capbke-system
 ```mermaid
 flowchart TD
     Cluster[Cluster:通用集群对象] --> XXXCluster[XXXCluste:基础设施 CRD]
-    XXXCluster --> Controller[XXXCluster Controller:调和循环)
+    XXXCluster --> Controller[XXXCluster Controller:调和循环]
     Controller --> Infra[基础设施资源:网络/负载均衡/节点]
     Infra --> Status[状态反馈:Ready/Endpoints/Error]
     Status --> Controller
