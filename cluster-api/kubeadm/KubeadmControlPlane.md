@@ -1,3 +1,34 @@
+# KubeadmControlPlane 的代码实现
+**KubeadmControlPlane 的代码实现在 `kubernetes-sigs/cluster-api` 主仓库内**，不是独立的仓库。
+
+具体目录结构：
+
+| 路径 | 内容 |
+|------|------|
+| `api/controlplane/kubeadm/v1beta2/` | API 类型定义 (CRD) |
+| `controlplane/kubeadm/` | 控制器实现 |
+| `controlplane/kubeadm/internal/controllers/` | 核心控制器 (reconcile, scale, update, remediation) |
+| `controlplane/kubeadm/internal/` | 内部逻辑 (workload cluster, etcd, coredns 管理) |
+| `controlplane/kubeadm/webhooks/` | Webhook 验证 |
+
+**关键文件**：
+
+| 文件 | 作用 |
+|------|------|
+| `controlplane/kubeadm/internal/controllers/controller.go` | KCP 主控制器入口 |
+| `controlplane/kubeadm/internal/controllers/scale.go` | 扩缩容逻辑 |
+| `controlplane/kubeadm/internal/controllers/update.go` | 滚动升级逻辑 |
+| `controlplane/kubeadm/internal/controllers/remediation.go` | 故障修复逻辑 |
+| `controlplane/kubeadm/internal/controllers/inplace.go` | 原地升级逻辑 |
+| `controlplane/kubeadm/internal/workload_cluster.go` | workload cluster 操作 |
+| `controlplane/kubeadm/internal/workload_cluster_etcd.go` | etcd 成员管理 |
+| `controlplane/kubeadm/internal/workload_cluster_coredns.go` | CoreDNS 管理 |
+
+**与 Infrastructure Provider 的区别**：
+- **KubeadmControlPlane** 和 **Kubeadm Bootstrap** 是 CAPI 主仓库内置的
+- **Infrastructure Provider** (如 CAPA、CAPV、CAPZ) 是独立仓库
+- 你方案中需要自研的 **CAPBM** (Bare Metal Provider) 需要是独立仓库
+
 # KubeadmControlPlane中的machineTemplate为什么不直接引用Infra中的XXXMachineTemplate？
 这是一个很好的问题，涉及到 **Cluster API 的抽象设计原则**。为什么 `KubeadmControlPlane` 中的 `machineTemplate` 不直接引用 `Cluster.spec.infrastructureRef`，而是必须引用某个具体的 `XXXMachineTemplate`（如 `AWSMachineTemplate`、`AzureMachineTemplate`）呢？  
 ## 🔑 设计原理
