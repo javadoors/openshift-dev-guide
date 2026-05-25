@@ -1,3 +1,155 @@
+# `kubeadm-config` ConfigMap
+是 kubeadm 在集群中存储配置的核心对象，也是 KCP 与 kubeadm 交互的关键桥梁。
+
+## 一、kubeadm-config ConfigMap 是什么
+
+### 位置与格式
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubeadm-config
+  namespace: kube-system
+data:
+  ClusterConfiguration: |
+    apiServer:
+      extraArgs:
+        authorization-mode: Node,RBAC
+      timeoutForControlPlane: 4m0s
+    apiVersion: kubeadm.k8s.io/v1beta4
+    certificatesDir: /etc/kubernetes/pki
+    clusterName: my-cluster
+    controllerManager: {}
+    dns: {}
+    etcd:
+      local:
+        dataDir: /var/lib/etcd
+    imageRepository: registry.k8s.io
+    kind: ClusterConfiguration
+    kubernetesVersion: v1.31.0
+    networking:
+      dnsDomain: cluster.local
+      serviceSubnet: 10.96.0.0/12
+    scheduler: {}
+  ClusterStatus: |
+    apiEndpoints:
+      master-01:
+        advertiseAddress: 192.168.1.101
+        bindPort: 6443
+    apiVersion: kubeadm.k8s.io/v1beta4
+    kind: ClusterStatus
+```
+
+### 作用
+| 功能 | 说明 |
+|------|------|
+| **配置存储** | 存储 `kubeadm init` 时使用的 `ClusterConfiguration` |
+| **升级依据** | `kubeadm upgrade` 读取此 ConfigMap 获取当前配置 |
+| **节点加入** | `kubeadm join --control-plane` 读取此 ConfigMap 获取集群配置 |
+| **版本管理** | 记录当前 Kubernetes 版本 |
+
+## 二、KCP 如何操作 kubeadm-config
+
+### 升级流程中的交互
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    KCP 升级流程                                      │
+│                                                                      │
+│  1. 用户修改 KCP spec.version: v1.30.0 → v1.31.0                    │
+│     ↓                                                                │
+│  2. KCP Controller 连接到 workload cluster                           │
+│     ↓                                                                │
+│  3. 读取 kube-system/kubeadm-config ConfigMap                        │
+│     ↓                                                                │
+│  4. 更新 ClusterConfiguration 中的 kubernetesVersion 字段            │
+│     ↓                                                                │
+│  5. 应用其他配置变更 (imageRepository, featureGates, apiServer 等)   │
+│     ↓                                                                │
+│  6. 更新 ConfigMap 到 workload cluster                               │
+│     ↓                                                                │
+│  7. 滚动替换控制面机器:                                              │
+│     ├── 删除旧机器 (v1.30.0)                                         │
+│     ├── 创建新机器 (v1.31.0)                                         │
+│     └── 新机器执行 kubeadm join --control-plane                      │
+│         └── 读取更新后的 kubeadm-config                              │
+│             └── 使用 v1.31.0 版本的 kubeadm 二进制                    │
+│     ↓                                                                │
+│  8. 逐个替换所有控制面机器                                           │
+│     ↓                                                                │
+│  9. 更新 CoreDNS/kube-proxy 镜像版本                                 │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### KCP 源码中的实现
+```go
+// workload_cluster.go
+func (w *Workload) UpdateClusterConfiguration(ctx context.Context, version semver.Version, mutators ...func(*bootstrapv1.ClusterConfiguration)) error {
+    // 1. 获取 ConfigMap
+    cm, err := w.getConfigMap(ctx, client.ObjectKey{
+        Namespace: metav1.NamespaceSystem,
+        Name:      kubeadmConfigKey,  // "kubeadm-config"
+    })
+    
+    // 2. 解析 ClusterConfiguration
+    clusterConfig := &bootstrapv1.ClusterConfiguration{}
+    yaml.Unmarshal([]byte(cm.Data[clusterConfigurationKey]), clusterConfig)
+    
+    // 3. 应用变更
+    clusterConfig.KubernetesVersion = fmt.Sprintf("v%s", version.String())
+    for _, mutator := range mutators {
+        mutator(clusterConfig)
+    }
+    
+    // 4. 写回 ConfigMap
+    updatedConfig, _ := yaml.Marshal(clusterConfig)
+    cm.Data[clusterConfigurationKey] = string(updatedConfig)
+    w.Client.Update(ctx, cm)
+    
+    return nil
+}
+```
+
+## 三、kubeadm-config 的关键字段
+| 字段 | 说明 | KCP 是否可修改 |
+|------|------|----------------|
+| `kubernetesVersion` | 当前 K8s 版本 | ✅ 升级时修改 |
+| `imageRepository` | 镜像仓库地址 | ✅ 通过 KCP spec 修改 |
+| `apiServer` | API Server 配置 | ✅ 通过 KCP spec 修改 |
+| `controllerManager` | Controller Manager 配置 | ✅ 通过 KCP spec 修改 |
+| `scheduler` | Scheduler 配置 | ✅ 通过 KCP spec 修改 |
+| `etcd` | etcd 配置 | ✅ 通过 KCP spec 修改 |
+| `networking` | 网络配置 (ServiceSubnet, PodSubnet) | ⚠️ 初始化后不建议修改 |
+| `clusterName` | 集群名称 | ❌ 初始化后不可修改 |
+| `certificatesDir` | 证书目录 | ❌ 初始化后不建议修改 |
+
+## 四、与你的方案的关系
+
+### 对你的需求的影响
+| 需求 | 与 kubeadm-config 的关系 |
+|------|-------------------------|
+| **外部 etcd** | kubeadm-config 中 `etcd.external` 字段定义 endpoints |
+| **API Server 配置** | kubeadm-config 中 `apiServer` 字段定义 extraArgs/extraVolumes |
+| **镜像仓库** | kubeadm-config 中 `imageRepository` 字段定义 |
+| **升级** | KCP 通过更新 kubeadm-config + 滚动替换机器实现 |
+| **控制面组件分离** | ❌ kubeadm-config 无法实现此需求，kubeadm 架构限制 |
+
+### 关键理解
+```
+kubeadm-config 是"配置声明"，不是"运行时控制"
+┌─────────────────────────────────────────────────────────────┐
+│  kubeadm-config 的作用                                       │
+│                                                              │
+│  ✅ 告诉 kubeadm "应该使用什么配置"                          │
+│  ✅ 告诉新加入节点 "集群的配置是什么"                        │
+│  ✅ 告诉升级流程 "当前版本是什么"                            │
+│                                                              │
+│  ❌ 不能控制 "哪个节点运行什么组件"                          │
+│  ❌ 不能实现 "API Server 与 Scheduler 分离部署"              │
+│  ❌ 不能动态修改已运行的 static pod 配置                     │
+└─────────────────────────────────────────────────────────────┘
+```
+**结论**: `kubeadm-config` ConfigMap 是 KCP 与 kubeadm 之间的配置契约。KCP 通过更新它来传递配置变更，但实际的组件部署仍然由 kubeadm 的架构决定（控制面组件必须同节点）。
+
 # KubeadmControlPlane 与 kubeadm API 关系及设计思想
 
 ## 一、KCP 是否依赖 kubeadm API？
