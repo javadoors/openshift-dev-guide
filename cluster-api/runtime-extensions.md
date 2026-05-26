@@ -1,3 +1,344 @@
+# Runtime Extension 与 Runtime Hook
+**在 Cluster API 中，Runtime Extension 与 Runtime Hook 并不是同一个概念：Runtime Hook 是定义好的生命周期接口，而 Runtime Extension 是实现这些 Hook 的外部服务。换句话说，Hook 是“规范”，Extension 是“实现”。**
+
+## 概念区分
+
+### **Runtime Hook**
+- **定义**：Cluster API 在集群生命周期（创建、升级、删除等）中预留的可扩展点。  
+- **作用**：描述在某个阶段可以触发的请求/响应接口（OpenAPI 规范）。  
+- **类似于**：Kubernetes Admission Webhook 的“调用点”，但专注于 Cluster API 生命周期。  
+- **例子**：Cluster 创建前的 `BeforeClusterCreate` Hook，升级时的 `BeforeClusterUpgrade` Hook。
+
+### **Runtime Extension**
+- **定义**：由开发者实现的 HTTPS 服务，负责处理某个或多个 Runtime Hook 的请求。  
+- **作用**：在 Hook 被触发时，执行自定义逻辑（如验证、修改配置、调用外部系统）。  
+- **类似于**：Admission Webhook 的“服务端实现”。  
+- **例子**：一个 Extension 可以在 `BeforeClusterUpgrade` Hook 中检查外部依赖是否满足条件。
+### 好流程图
+直观展示 Cluster API 生命周期中 **Runtime Hook 与 Runtime Extension** 的调用关系：
+```mermaid
+flowchart TD
+    A[Cluster API 控制器] --> B[触发 Runtime Hook]
+    B -->|请求| C[Runtime Extension 服务]
+    C -->|响应| B
+    B --> D[继续生命周期操作]
+
+    subgraph Hooks
+        B1[BeforeClusterCreate]
+        B2[BeforeClusterUpgrade]
+        B3[BeforeClusterDelete]
+    end
+
+    B --> B1
+    B --> B2
+    B --> B3
+
+    subgraph Extensions
+        C1[验证配置服务]
+        C2[外部依赖检查服务]
+        C3[安全策略服务]
+    end
+
+    C --> C1
+    C --> C2
+    C --> C3
+```
+图解说明
+- **Runtime Hook**：由 Cluster API 定义的生命周期触发点（如创建前、升级前、删除前）。  
+- **Runtime Extension**：外部服务，负责实现 Hook 的逻辑（如验证、依赖检查、安全策略）。  
+- **调用流程**：  
+  1. 控制器在生命周期事件触发时调用 Hook。  
+  2. Hook 将请求发送给已注册的 Extension 服务。  
+  3. Extension 返回响应，控制器根据结果继续或中止操作。  
+
+这个图清楚地展示了 **Hook 是接口规范，Extension 是实现服务**，两者配合才能扩展 Cluster API 生命周期。  
+
+## 关系总结
+- **Hook = 接口定义**（规范、触发点）  
+- **Extension = Hook 的实现**（外部服务，执行逻辑）  
+- **运行机制**：Cluster API 控制器在生命周期事件触发时，会调用已注册的 Runtime Extension 服务，后者根据 Hook 规范返回结果。  [The Cluster API Book](https://cluster-api.sigs.k8s.io/tasks/experimental-features/runtime-sdk/implement-extensions)  [deepwiki.com](https://deepwiki.com/kubernetes-sigs/cluster-api/5.5-runtime-extensions)
+
+## 对比表
+| 概念 | 角色 | 作用 | 示例 |
+|------|------|------|------|
+| **Runtime Hook** | 接口规范 | 定义生命周期触发点及请求/响应格式 | `BeforeClusterCreate` |
+| **Runtime Extension** | 实现服务 | 提供逻辑处理，响应 Hook 请求 | 自定义验证服务 |
+
+## 关键结论
+- **Runtime Hook 是“规范”，Runtime Extension 是“实现”。**  
+- Hook 本身不执行逻辑，只定义调用点；Extension 才是实际运行的服务。  
+- 两者关系类似于 **接口与实现类**，必须配合使用才能扩展 Cluster API 生命周期。
+
+
+# Cluster API Runtime Extension
+## Cluster API Runtime Extension 关键组件设计思路与功能说明
+
+### 一、整体架构视角
+Runtime Extension 是 **外部可扩展服务**，由用户实现并部署，CAPI 通过 HTTPS 调用。系统分为 **两端**：
+```
+┌─────────────────────────────────────────┐         ┌──────────────────────────────────────────┐
+│           CAPI 侧 (Client)               │        │        Extension 侧 (Server)             │
+│                                          │        │                                          │
+│  ┌─────────────┐   ┌──────────────┐     │         │     ┌──────────────┐   ┌───────────────┐ │
+│  │   Client    │──▶│   Registry   │     │  HTTPS  │    │    Server    │   │   Catalog      │ │
+│  │ (调用编排)   │   │ (扩展注册表)  │     │  POST   │    │ (HTTP框架)    │   │  (类型系统)    │ │
+│  └─────────────┘   └──────────────┘     │         │     └──────────────┘   └───────────────┘ │
+│                                          │        │                                          │
+│  ┌──────────────────────────────────┐    │        │     ┌──────────────────────────────────┐ │
+│  │       ExtensionConfig CRD        │    │        │     │    Extension Handlers (用户代码)  │ │
+│  │   (扩展配置与发现结果)             │    │        │     ┌────────────────────────────────┐ │ │
+│  └──────────────────────────────────┘    │        │     │ BeforeClusterCreate, ...       │ │ │
+└─────────────────────────────────────────┘         │     └────────────────────────────────┘ │ │
+                                                    └──────────────────────────────────────────┘
+```
+
+### 二、核心组件详解
+
+#### 1. Server（扩展服务端框架）
+**文件：** `exp/runtime/server/server.go`
+
+**设计思路：**
+- 为扩展开发者提供 **开箱即用的 HTTPS 框架**
+- 封装 HTTP 请求/响应生命周期（反序列化 → 调用 Handler → 序列化）
+- 自动注入 Discovery 端点，实现自描述 API
+- 基于 `controller-runtime` webhook server 构建
+
+**核心结构：**
+```go
+type Server struct {
+    webhook.Server                     // 嵌入 controller-runtime webhook server
+    catalog  *runtimecatalog.Catalog  // 类型目录
+    handlers map[string]ExtensionHandler  // path → handler 映射
+}
+
+type ExtensionHandler struct {
+    gvh             runtimecatalog.GroupVersionHook  // 自动计算
+    requestObject   runtime.Object                   // 自动创建
+    responseObject  runtime.Object                   // 自动创建
+    Hook            runtimecatalog.Hook              // 用户传入
+    Name            string                           // Handler 名称
+    HandlerFunc     runtimecatalog.Hook              // 用户逻辑 func(ctx, *Req, *Resp)
+    TimeoutSeconds  *int32                           // 超时（返回给 Discovery）
+    FailurePolicy   *runtimehooksv1.FailurePolicy    // 失败策略（返回给 Discovery）
+}
+```
+
+**关键方法流程：**
+
+| 方法 | 功能 |
+|------|------|
+| `New(options)` | 创建 Server，配置 TLS、端口、证书目录 |
+| `AddExtensionHandler(handler)` | 注册 Handler：验证签名、计算 GVH、创建请求/响应对象、计算 HTTP 路径 |
+| `Start(ctx)` | 自动添加 Discovery Handler，包装所有 Handlers，启动 HTTPS 服务 |
+| `wrapHandler(handler)` | 创建 HTTP Handler：读取请求体 → 反序列化 → 反射调用 → 序列化响应 |
+| `callHandler(handler, r)` | 核心调用逻辑 |
+| `discoveryHandler(handlers)` | 生成 Discovery 响应，列出所有已注册 Handlers |
+
+**Handler 路径计算：**
+```
+/{group}/{version}/{hook}/{name}
+例：/hooks.runtime.cluster.x-k8s.io/v1alpha1/beforeclustercreate/before-cluster-create
+```
+
+**设计模式：**
+- **适配器模式**：包装 controller-runtime webhook server
+- **模板方法模式**：`wrapHandler` 提供请求/响应生命周期，委托用户 Handler
+- **自动发现模式**：内置 Discovery 端点，无需手动实现
+
+#### 2. Catalog（类型目录）
+**文件：** `exp/runtime/catalog/catalog.go`
+
+**在 Extension 侧的作用：**
+- 注册所有 Hook 定义（函数签名、Request/Response 类型）
+- 用于 Server 验证 Handler 签名是否正确
+- 用于创建请求/响应对象实例
+- 生成 OpenAPI 定义（用于 Discovery 响应）
+
+**核心结构：**
+```go
+type Catalog struct {
+    scheme              *runtime.Scheme
+    gvhToType           map[GroupVersionHook]reflect.Type   // GVH → 函数类型
+    typeToGVH           map[reflect.Type]GroupVersionHook   // 函数类型 → GVH
+    gvhToHookDescriptor map[GroupVersionHook]hookDescriptor // GVH → 元数据
+    openAPIDefinitions  []OpenAPIDefinitionsGetter          // OpenAPI 定义
+}
+```
+
+**Extension 侧使用方式：**
+```go
+var catalog = runtimecatalog.New()
+
+func init() {
+    // 注册所有 CAPI 定义的 Hook
+    _ = runtimehooksv1.AddToCatalog(catalog)
+}
+```
+
+#### 3. ExtensionConfig CRD（扩展配置）
+**文件：** `api/runtime/v1beta2/extensionconfig_types.go`
+
+**设计思路：**
+- 作为 CAPI 与扩展之间的 **配置契约**
+- Spec 定义连接方式和策略
+- Status 通过 Discovery 自动填充支持的 Handlers
+- 支持集群内 Service 或外部 URL 两种连接模式
+
+**核心结构：**
+```go
+type ExtensionConfigSpec struct {
+    ClientConfig      ClientConfig              // 连接配置
+    NamespaceSelector *metav1.LabelSelector     // 命名空间过滤
+    Settings          map[string]string         // 全局 Settings
+}
+
+type ClientConfig struct {
+    URL      string             // 外部 URL (https://...)
+    Service  ServiceReference   // 集群内 Service
+    CABundle []byte             // CA 证书
+}
+
+type ExtensionConfigStatus struct {
+    Conditions []metav1.Condition   // Discovered, Paused
+    Handlers   []ExtensionHandler   // 发现的 Handlers
+}
+```
+
+**Discovery 流程：**
+```
+1. 用户创建 ExtensionConfig CR
+2. CAPI Controller 调用 Extension 的 /discovery 端点
+3. Extension Server 返回所有已注册的 Handlers
+4. CAPI 更新 ExtensionConfig.Status.Handlers
+5. CAPI Registry 根据 Status.Handlers 注册 ExtensionRegistration
+```
+
+#### 4. Discovery 机制
+**设计思路：**
+- 扩展 **自描述** 支持哪些 Hooks
+- CAPI 无需预先知道扩展能力
+- 通过 HTTP POST 调用 `/hooks.runtime.cluster.x-k8s.io/v1alpha1/discovery`
+
+**Discovery 请求/响应：**
+```go
+// 请求
+type DiscoveryRequest struct {}
+
+// 响应
+type DiscoveryResponse struct {
+    CommonResponse `json:",inline"`
+    Handlers       []ExtensionHandler `json:"handlers"`
+}
+
+type ExtensionHandler struct {
+    Name           string           // Handler 名称
+    RequestHook    GroupVersionHook // 支持的 Hook
+    TimeoutSeconds int32            // 超时
+    FailurePolicy  FailurePolicy    // 失败策略
+}
+```
+
+**Server 自动实现：**
+```go
+// Start() 中自动添加
+discoveryHandler := server.ExtensionHandler{
+    Hook:        runtimehooksv1.Discovery,
+    Name:        "discovery",
+    HandlerFunc: s.discoveryHandler,
+}
+s.AddExtensionHandler(discoveryHandler)
+```
+
+#### 5. ExtensionRegistration（运行时注册条目）
+**文件：** `internal/runtime/registry/registry.go`
+
+**设计思路：**
+- Registry 中的内存条目，由 ExtensionConfig 解析而来
+- 包含调用扩展所需的所有信息
+
+**核心结构：**
+```go
+type ExtensionRegistration struct {
+    Name                           string                     // Handler 唯一名称
+    ExtensionConfigName            string                     // 所属 ExtensionConfig
+    ExtensionConfigResourceVersion string                     // 资源版本
+    GroupVersionHook               runtimecatalog.GroupVersionHook
+    NamespaceSelector              labels.Selector            // 命名空间过滤
+    ClientConfig                   runtimev1.ClientConfig     // 连接配置
+    TimeoutSeconds                 int32                      // 超时
+    FailurePolicy                  runtimev1.FailurePolicy    // 失败策略
+    Settings                       map[string]string          // 全局 Settings
+}
+```
+
+### 三、组件协作流程
+
+#### 注册与发现流程
+```
+1. 开发者实现 Extension Server，注册 Handlers
+   └── server.AddExtensionHandler(ExtensionHandler{Hook, Name, HandlerFunc})
+
+2. 部署 Extension（Deployment + Service + Certificate）
+
+3. 用户创建 ExtensionConfig CR
+   └── spec.clientConfig.service = {namespace, name, port}
+   └── spec.namespaceSelector = {...}
+   └── spec.settings = {...}
+
+4. CAPI Controller 调用 Discovery
+   └── POST /hooks.runtime.cluster.x-k8s.io/v1alpha1/discovery
+   └── Server 返回 {Handlers: [{Name, RequestHook, TimeoutSeconds, FailurePolicy}]}
+
+5. CAPI 更新 ExtensionConfig.Status.Handlers
+
+6. CAPI Registry.Add(ExtensionConfig)
+   └── 解析 Handlers，创建 ExtensionRegistration 条目
+```
+
+#### Hook 调用流程
+```
+1. CAPI Controller 调用 CallAllExtensions(BeforeClusterCreate, ...)
+
+2. Client 查找 Registry
+   └── Registry.List(GroupHook{..., "BeforeClusterCreate"})
+   └→ 得到 ExtensionRegistration 列表
+
+3. 对每个 Registration：
+   ├── 检查 NamespaceSelector 是否匹配 Cluster 所在命名空间
+   ├── 构建 HTTP 请求
+   │   ├── URL: https://{service}.{namespace}.svc:{port}/{group}/{version}/{hook}/{name}
+   │   ├── TLS: 使用 CABundle 验证
+   │   ├── Timeout: Registration.TimeoutSeconds
+   │   └── Body: JSON 序列化的 Request（包含 Settings）
+   ├── 发送 POST 请求
+   └── 接收响应
+       ├── 反序列化 Response
+       ├── 检查 Status (Success/Failure)
+       └── 应用 FailurePolicy
+
+4. 聚合响应，返回给 Controller
+```
+
+### 四、设计原则总结
+| 原则 | 实现方式 |
+|------|----------|
+| **自描述** | Discovery 端点自动发现扩展能力 |
+| **类型安全** | Catalog 验证 Handler 签名，反射确保类型匹配 |
+| **灵活连接** | 支持集群内 Service 或外部 URL |
+| **弹性设计** | Timeout + FailurePolicy（Fail/Ignore） |
+| **作用域控制** | NamespaceSelector 限制扩展影响范围 |
+| **配置覆盖** | Settings 可在 ClusterClass 级别覆盖 |
+| **安全性** | mTLS（CABundle）、自动 CA 注入注解 |
+| **可观测性** | Conditions（Discovered, Paused）、结构化日志 |
+| **关注点分离** | Server（框架）、Catalog（类型）、ExtensionConfig（配置）、Registry（运行时状态） |
+
+### 五、关键注解
+| 注解 | 用途 |
+|------|------|
+| `runtime.cluster.x-k8s.io/inject-ca-from-secret` | 自动从 Secret 注入 CA 到 `caBundle` |
+| `runtime.cluster.x-k8s.io/pending-hooks` | 跟踪待完成的 Hook 调用 |
+| `runtime.cluster.x-k8s.io/ok-to-delete` | 标记 Cluster 可安全删除 |
+
 # Cluster-API Runtime Extensions 完整能力列表
 
 ## Cluster-API Runtime Extensions 完整能力列表
