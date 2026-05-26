@@ -479,3 +479,84 @@ CAPI 控制器会：
 1. 检测到版本变更
 2. 将新版本传播到 Machine 的 `spec.version`
 3. 触发 Machine 的更新流程（滚动替换或原地升级）
+
+# **`CanUpdateMachine` 原地更新条件判断清单**
+
+## 支持原地更新的场景
+- **配置参数调整**  
+  - kubelet 配置（如 `--max-pods`、`--eviction-hard`）  
+  - 内核参数或 sysctl 调整  
+  - 不涉及重启的轻量化配置更新  
+
+- **镜像替换但版本不变**  
+  - 基础镜像相同，仅替换容器运行时或工具包  
+  - 不影响 kubelet 或 API Server 版本  
+
+- **标签/注解更新**  
+  - 节点标签、污点、注解的修改  
+  - 不涉及节点重建  
+
+## 不支持原地更新的场景
+- **Kubernetes 版本升级**  
+  - `spec.version` 发生变化，需要滚动替换节点  
+- **操作系统镜像变更**  
+  - 例如从 Ubuntu → CentOS，必须重建节点  
+- **硬件规格变更**  
+  - CPU、内存、磁盘大小调整，云厂商通常要求重新创建实例  
+
+## 判断逻辑示例
+```go
+if request.Machine.Spec.Version == request.DesiredVersion &&
+   request.Machine.Spec.Image == request.DesiredImage {
+    response.Status = runtimehooksv1.ResponseStatusSuccess
+    response.CanUpdate = true
+    response.Reason = "Safe in-place update: config change only"
+} else {
+    response.Status = runtimehooksv1.ResponseStatusFailure
+    response.CanUpdate = false
+    response.Reason = "Requires rolling update: version or image change"
+}
+```
+
+## 判断为支持原地更新的方式
+在响应对象 `response *runtimehooksv1.CanUpdateMachineResponse` 中，需要设置：
+- **允许更新标志**  
+  ```go
+  response.Status = runtimehooksv1.ResponseStatusSuccess
+  response.CanUpdate = true
+  ```
+  表示 Hook 执行成功，并且允许原地更新。
+
+- **原因说明**  
+  可以设置 `response.Reason` 字段，说明为什么支持原地更新，例如：
+  ```go
+  response.Reason = "In-place update supported for kubelet config change"
+  ```
+### 示例代码片段
+```go
+func (h *InPlaceUpdater) CanUpdateMachine(
+    ctx context.Context,
+    request *runtimehooksv1.CanUpdateMachineRequest,
+    response *runtimehooksv1.CanUpdateMachineResponse,
+) {
+    // 判断条件，例如只允许 kubelet 配置更新
+    if request.Machine.Spec.Version == request.DesiredVersion {
+        response.Status = runtimehooksv1.ResponseStatusSuccess
+        response.CanUpdate = true
+        response.Reason = "Version unchanged, safe to update in place"
+    } else {
+        response.Status = runtimehooksv1.ResponseStatusFailure
+        response.CanUpdate = false
+        response.Reason = "Version change requires rolling update"
+    }
+}
+```
+### 总结
+- **支持原地更新** → `response.Status = Success` 且 `response.CanUpdate = true`。  
+- **不支持原地更新** → `response.Status = Failure` 或 `response.CanUpdate = false`。  
+- **原因说明** → 用 `response.Reason` 字段补充。  
+
+- **支持原地更新** → 配置、标签、轻量化调整。  
+- **不支持原地更新** → 版本升级、镜像/OS 变更、硬件规格调整。  
+- **响应判断** → `response.Status = Success` 且 `response.CanUpdate = true`。  
+
