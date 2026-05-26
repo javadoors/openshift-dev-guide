@@ -47,8 +47,78 @@
 | 默认（内置 etcd） | 所有 master 节点（静态 Pod） | 自动组成 etcd 集群，紧密集成，易用但耦合 |
 | 外部 etcd | 独立服务器或集群 | 更灵活，可独立扩展和运维，但需要额外管理 |
 
----
-
 👉 所以答案是：**在 kubeadm 默认模式下，etcd 会安装在所有 master 节点上，以静态 Pod 方式运行；但也支持用户提供外部 etcd 集群来替代。**
 
-要不要我帮你画一个 **Mermaid 架构图**，直观展示多 master 节点上 etcd 静态 Pod 如何组成集群并与 API Server 交互？
+# etcd升级
+在 **kubeadm 升级流程**里，etcd 的处理方式和控制平面组件不一样：
+- **默认情况**：  
+  kubeadm **不会自动升级 etcd**，它只负责升级 Kubernetes 控制平面组件（API Server、Controller Manager、Scheduler、kubelet 等）。  
+  etcd 的升级需要单独操作，通常由管理员手动执行。
+
+- **例外情况**：  
+  如果你的集群是通过 kubeadm 初始化并使用 **本地静态 Pod 方式运行 etcd**（即 etcd 作为控制平面节点上的静态 Pod），那么在执行 `kubeadm upgrade apply` 时，kubeadm 会检查并更新 etcd 镜像版本，使其与目标 Kubernetes 版本兼容。  
+  但这只是镜像替换，不包含自动的 **数据迁移或备份恢复**。
+
+- **外部 etcd 集群**：  
+  如果你使用的是 **外部托管的 etcd 集群**（例如独立节点或托管服务），kubeadm 完全不会触碰它。升级 kubeadm 时，你必须自己规划 etcd 的升级、备份与恢复。
+
+## 总结
+- kubeadm 升级 **控制平面组件**，不会自动负责 etcd 的升级和数据安全。  
+- 如果 etcd 是 kubeadm 管理的静态 Pod，kubeadm 会更新镜像版本，但仍需你提前做好 **etcd 备份**。  
+- 如果 etcd 是外部集群，升级完全由你自己负责。
+
+# kubeadm的升级范围
+**kubeadm 升级时主要负责控制平面和节点相关的 Kubernetes 组件，不会自动处理用户工作负载，也不会管理外部依赖（如外部 etcd、CNI 插件或存储驱动）。如果 etcd 是 kubeadm 管理的静态 Pod，它会更新镜像版本；但外部 etcd 完全不在其范围内。**
+
+## kubeadm 升级范围清单
+
+### ✅ kubeadm 负责升级的组件
+- **kube-apiserver**  
+  核心 API 服务，升级时会替换静态 Pod 镜像。
+- **kube-controller-manager**  
+  控制器组件，确保资源状态与期望一致。
+- **kube-scheduler**  
+  调度器，负责 Pod 调度。
+- **etcd（仅限本地静态 Pod）**  
+  如果 etcd 是 kubeadm 初始化的静态 Pod，升级时会更新镜像版本。
+- **CoreDNS**  
+  集群 DNS 服务，kubeadm 会更新其 Deployment。
+- **kube-proxy**  
+  负责 Service 网络代理，升级时会更新 DaemonSet。
+- **kubelet**  
+  节点代理，需在每个节点手动执行升级命令。
+- **kubectl**  
+  客户端工具，通常与控制平面版本保持一致。
+
+### ❌ kubeadm 不负责升级的组件
+- **外部 etcd 集群**  
+  独立部署的 etcd 需要管理员自行升级和备份。
+- **CNI 插件**  
+  如 Calico、Flannel、Cilium，需手动升级。
+- **CSI 插件**  
+  存储驱动需独立维护。
+- **工作负载**  
+  应用 Pod、Deployment、StatefulSet 等不会被触碰。
+- **第三方控制器/Operator**  
+  例如监控、日志、服务网格等需单独升级。
+- **操作系统与容器运行时**  
+  如 containerd、CRI-O、Docker，需手动升级。
+
+## 对比表：kubeadm 升级范围
+| 组件类别 | kubeadm 是否负责 | 说明 |
+|----------|----------------|------|
+| **控制平面核心组件** | ✅ | API Server、Controller Manager、Scheduler |
+| **etcd（静态 Pod）** | ✅ | 镜像版本更新，但需手动备份 |
+| **etcd（外部集群）** | ❌ | 完全由管理员负责 |
+| **CoreDNS / kube-proxy** | ✅ | 自动更新 Deployment/DaemonSet |
+| **kubelet / kubectl** | ✅ | 需在节点上手动执行升级命令 |
+| **CNI / CSI 插件** | ❌ | 网络与存储插件需独立升级 |
+| **用户工作负载** | ❌ | 不会触碰应用 Pod |
+| **第三方 Operator** | ❌ | 需单独维护 |
+| **操作系统 / 容器运行时** | ❌ | 不在 kubeadm 范围内 |
+
+## 关键结论
+- **kubeadm 升级范围有限**：只覆盖 Kubernetes 核心组件。  
+- **etcd 特殊情况**：仅在静态 Pod 模式下由 kubeadm 更新镜像，外部 etcd 不受影响。  
+- **网络、存储、工作负载**：需管理员独立升级。  
+
