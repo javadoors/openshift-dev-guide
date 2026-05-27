@@ -138,3 +138,82 @@ flowchart TD
 - kubeadm 的升级流程失败点在 **合法性检查阶段**。  
 - 即使正则和 semver 解析允许扩展标签，最终升级会被拒绝。  
 - 最佳实践：保持标准版本号（`vX.Y.Z`），仓库可定制，镜像内容可定制。  
+
+# kubeadm 不支持跨越多个 minor 版本的“链式升级”
+**kubeadm 不支持跨越多个 minor 版本的“链式升级”，必须逐个 minor 版本依次升级（例如 1.24 → 1.25 → 1.26），但 patch 版本可以直接跳过。**换句话说，kubeadm 的升级流程是线性逐步推进，而不是一次性跨多个版本。  [Kubernetes](https://kubernetes.io/docs/tasks/administer-cluster/kubeadm/kubeadm-upgrade/)  
+
+## 📌 kubeadm 升级规则
+- **不支持跳过 minor 版本**  
+  - 必须逐个 minor 版本升级，例如：  
+    - 从 v1.24.x → v1.25.x → v1.26.x  
+  - 不能直接从 v1.24.x 升级到 v1.26.x。  
+- **支持跳过 patch 版本**  
+  - 可以直接从 v1.25.1 升级到 v1.25.6。  
+- **版本 skew 策略**  
+  - kubeadm 与 kubelet 版本差异不能超过 ±1 minor。  
+  - 控制面与工作节点也必须保持在 ±1 minor 范围内。  
+
+## ⚖️ 升级流程概览
+1. **升级 kubeadm**  
+   ```bash
+   apt-get install -y kubeadm=<target-version>
+   ```
+   或  
+   ```bash
+   yum install -y kubeadm-<target-version>
+   ```
+2. **规划升级**  
+   ```bash
+   kubeadm upgrade plan
+   ```
+   查看可升级的版本和兼容性。  
+3. **升级控制面节点**  
+   ```bash
+   kubeadm upgrade apply <target-version>
+   ```
+   - 先升级主控制面节点，再升级其他控制面节点。  
+4. **升级工作节点**  
+   ```bash
+   kubeadm upgrade node
+   ```
+   - 逐个 drain 节点 → 升级 kubelet → 恢复节点。  
+
+## 🚀 总结
+- kubeadm **不支持链式升级**，只能逐个 minor 版本升级。  
+- patch 版本可以直接跳过。  
+- 升级顺序：**控制面 → 其他控制面 → 工作节点**。  
+- 升级过程中必须遵守 **版本 skew 容忍策略**，避免 API Server 与 kubelet 版本不兼容。  
+
+# kubeadm 升级流程图 
+直观展示逐个 minor 版本升级的步骤，以及控制面与工作节点的顺序：
+```mermaid
+flowchart TD
+    A[开始升级] --> B[升级 kubeadm 到目标版本]
+    B --> C[kubeadm upgrade plan 检查可升级版本]
+
+    C --> D[升级主控制面节点]
+    D --> E[健康检查-API Server/etcd]
+    E --> F[升级其他控制面节点]
+
+    F --> G{版本 skew 检查}
+    G -- 满足 --> H[逐个升级工作节点]
+    G -- 不满足 --> I[插入中间版本升级步骤]
+
+    H --> J[所有工作节点升级完成]
+    I --> H
+
+    J --> K[集群升级完成]
+```
+
+### 📌 流程说明
+- **升级 kubeadm**：先在所有节点安装目标版本的 kubeadm。  
+- **规划升级**：运行 `kubeadm upgrade plan`，确认目标版本和兼容性。  
+- **控制面优先**：先升级主控制面节点，再升级其他控制面节点。  
+- **版本 skew 检查**：确保控制面与工作节点差异不超过 ±1 minor。  
+- **工作节点升级**：逐个 drain → 升级 kubelet → 恢复节点。  
+- **最终完成**：所有节点升级完成，集群版本一致。  
+
+### 🚀 总结
+- kubeadm **不支持跨越多个 minor 的链式升级**，必须逐个 minor 升级。  
+- 升级顺序：**先控制面 → 再工作节点**。  
+- 每一步都要进行 **健康检查** 和 **版本 skew 检查**，确保集群稳定。  
