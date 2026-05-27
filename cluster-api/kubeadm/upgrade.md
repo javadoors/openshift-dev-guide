@@ -217,3 +217,42 @@ flowchart TD
 - kubeadm **不支持跨越多个 minor 的链式升级**，必须逐个 minor 升级。  
 - 升级顺序：**先控制面 → 再工作节点**。  
 - 每一步都要进行 **健康检查** 和 **版本 skew 检查**，确保集群稳定。  
+
+# 主控制面节点
+在 **kubeadm 升级流程**里，所谓的 **主控制面节点**（Primary Control Plane Node）指的是集群中第一个被初始化的控制面节点，也就是运行 `kubeadm init` 的节点。它通常承担以下关键职责：  
+
+## 📌 主控制面节点的角色
+- **API Server**：集群的入口，所有 kubectl 和组件交互都通过它。  
+- **etcd 数据存储**：保存集群的状态信息。  
+- **控制器管理器**：负责集群对象的生命周期管理。  
+- **调度器**：负责 Pod 的调度。  
+
+## ⚖️ 升级顺序中的意义
+在 kubeadm 升级时，**主控制面节点必须最先升级**，原因是：  
+1. **API Server 版本决定集群能力**：工作节点和其他控制面节点必须与它保持兼容。  
+2. **etcd 数据一致性**：主控制面节点升级时会先升级 etcd，保证数据存储格式兼容。  
+3. **版本 skew 容忍策略**：其他控制面节点和工作节点的 kubelet 版本不能超过 ±1 minor，因此必须先让主控制面节点升级到目标版本。  
+
+## 🚀 升级流程中的步骤
+1. **升级主控制面节点的 kubeadm**  
+   ```bash
+   apt-get install -y kubeadm=<target-version>
+   ```
+2. **运行升级计划**  
+   ```bash
+   kubeadm upgrade plan
+   ```
+3. **应用升级**  
+   ```bash
+   kubeadm upgrade apply <target-version>
+   ```
+   - 这一步会升级 API Server、etcd、控制器管理器和调度器。  
+4. **健康检查**  
+   - 确认 API Server 和 etcd 正常运行。  
+5. **继续升级其他控制面节点**  
+   - 使用 `kubeadm upgrade node`。  
+
+## 🎯 总结
+- 主控制面节点是集群的 **核心入口和数据存储节点**。  
+- 在 kubeadm 升级中，它必须 **最先升级**，确保 API Server 和 etcd 与目标版本兼容。  
+- 升级完成后，再逐步升级其他控制面节点和工作节点。  
