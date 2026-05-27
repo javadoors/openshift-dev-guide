@@ -27,3 +27,125 @@
 - OpenShift 在安装集群前有 **内置预检机制**（`openshift-install`）和 **诊断工具**（如 `oc adm diagnostics`）。  
 - 官方文档也提供了 **Preflight Checks 列表**，涵盖环境、网络、依赖、安全等方面。  
 - 在企业场景下，还可以结合 **Preflight CLI** 做镜像和 Operator 的合规检查。  
+
+
+# OpenShift 安装前检查清单
+下面给你整理一个 **OpenShift 安装前检查清单**，涵盖环境、网络、依赖、安全等方面，方便在部署前逐项确认。  
+
+## 📌 OpenShift 安装前检查清单
+| **检查类别** | **检查项** | **说明** |
+|--------------|------------|----------|
+| **操作系统与硬件** | OS 版本 | 确认使用 RHEL CoreOS 或兼容版本，版本需满足官方支持矩阵 |
+| | CPU/内存 | 每个节点至少 4 vCPU、16GB RAM（生产环境更高） |
+| | 磁盘空间 | 至少 120GB，可用空间满足 etcd 和容器存储需求 |
+| | 时钟同步 | NTP 服务正常，避免 etcd 数据不一致 |
+| **网络** | 节点连通性 | 节点间网络可达，ping/端口探测正常 |
+| | DNS | 节点主机名解析正确，集群域名可解析 |
+| | 防火墙/端口 | 必要端口开放（API Server、etcd、Ingress、NodePort 等） |
+| | 负载均衡 | 控制面节点前需配置负载均衡器 |
+| **依赖与配置** | Pull Secret | 有效的 Red Hat Pull Secret，用于镜像拉取 |
+| | 云平台权限 | 在 AWS/Azure/GCP 等平台上，确保安装器有足够 API 权限 |
+| | 镜像仓库 | 能访问 registry.redhat.io 和 quay.io |
+| | kubeconfig | 安装器能正确生成并使用 kubeconfig |
+| **安全与合规** | SELinux | 建议启用并配置为 enforcing 模式 |
+| | TLS 证书 | 确认证书有效，避免 API Server 启动失败 |
+| | 用户权限 | 安装用户需具备 root 或 sudo 权限 |
+| **安装器预检** | 配置文件 | `install-config.yaml` 参数正确（域名、网络、平台） |
+| | 安装器检查 | `openshift-install create cluster` 会自动验证配置和环境 |
+
+## 🚀 总结
+- **环境**：操作系统、硬件资源、时钟同步。  
+- **网络**：节点连通性、DNS、防火墙、负载均衡。  
+- **依赖**：Pull Secret、云平台权限、镜像仓库访问。  
+- **安全**：SELinux、TLS、用户权限。  
+- **安装器**：配置文件和自动预检。  
+
+这个清单可以作为 **部署前的核对表**，逐项确认后再运行 `openshift-install`，能大幅减少安装失败的风险。  
+
+# OpenShift/Kubernetes 安装前检查操作手册
+面给你一个 **OpenShift/Kubernetes 安装前检查操作手册**，把每个检查项的具体命令列出来，方便直接执行验证。  
+
+## 📌 安装前检查操作手册
+
+### 1. **环境检查**
+- 操作系统版本  
+  ```bash
+  cat /etc/os-release
+  uname -r
+  ```
+- CPU/内存/磁盘  
+  ```bash
+  lscpu
+  free -h
+  df -h
+  ```
+- 时钟同步  
+  ```bash
+  ntpstat        # NTP 状态
+  timedatectl    # 确认时区和同步状态
+  ```
+
+### 2. **网络检查**
+- 节点连通性  
+  ```bash
+  ping <node-ip>
+  nc -zv <node-ip> 6443   # 检查 API Server 端口
+  ```
+- DNS 解析  
+  ```bash
+  dig <cluster-domain>
+  nslookup <cluster-domain>
+  ```
+- 防火墙/端口  
+  ```bash
+  firewall-cmd --list-all
+  netstat -tulnp | grep LISTEN
+  ```
+
+### 3. **依赖检查**
+- 容器运行时  
+  ```bash
+  systemctl status docker
+  systemctl status containerd
+  ```
+- kubelet/kubeadm 版本  
+  ```bash
+  kubelet --version
+  kubeadm version
+  ```
+- 镜像仓库访问  
+  ```bash
+  curl -I https://registry.redhat.io
+  curl -I https://quay.io
+  ```
+
+### 4. **安全检查**
+- SELinux 状态  
+  ```bash
+  getenforce
+  sestatus
+  ```
+- TLS 证书有效性  
+  ```bash
+  openssl x509 -in /etc/kubernetes/pki/apiserver.crt -noout -dates
+  ```
+- 用户权限  
+  ```bash
+  id
+  sudo -l
+  ```
+
+### 5. **安装器预检**
+- 配置文件检查  
+  ```bash
+  cat install-config.yaml
+  ```
+- 安装器自动检查  
+  ```bash
+  ./openshift-install create cluster --log-level=debug
+  ```
+
+## 🚀 总结
+这份操作手册提供了 **逐项检查命令**，涵盖环境、网络、依赖、安全和安装器预检。  
+- **执行顺序**：先环境 → 网络 → 依赖 → 安全 → 安装器。  
+- **结果分级**：✅ 正常、⚠️ 警告（可继续但需优化）、❌ 错误（必须修复）。  
