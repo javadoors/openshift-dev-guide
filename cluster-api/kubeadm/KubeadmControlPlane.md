@@ -1,3 +1,37 @@
+# *KubeadmControlPlane 与 machineTemplate 的关系
+**在 Cluster API 中，`KubeadmControlPlane` 的 `machineTemplate` 主要作用是定义控制平面节点的底层机器规格与元数据，并确保在升级或扩缩容时保持一致性。它允许在不触发整批节点替换的情况下，原地传播部分字段的修改。**
+
+## ✨ 关键作用
+- **机器规格定义**  
+  `machineTemplate` 描述控制平面节点的基础设施机器（如 VM 规格、标签、注解），确保所有控制平面节点使用统一模板。
+
+- **原地传播**  
+  对 `.spec.machineTemplate.metadata.labels` 和 `.spec.machineTemplate.metadata.annotations` 的修改会直接应用到现有节点，而不会触发整批节点的替换。
+
+- **升级与扩缩容**  
+  在控制平面升级或扩缩容时，`machineTemplate` 提供一致的机器定义，避免因配置差异导致节点不一致。
+
+- **删除钩子支持**  
+  在节点删除时，Cluster API 会自动执行 **cordon & drain**，并支持 `PreDrainDeleteHook` 与 `PreTerminateDeleteHook`，保证安全下线。
+
+## 📑 作用范围对比表
+
+| **功能** | **作用对象** | **是否触发整批替换** |
+|----------------|----------------|----------------|
+| `.spec.machineTemplate.metadata.labels` | Machine / InfraMachine / KubeadmConfig | 否（原地传播） |
+| `.spec.machineTemplate.metadata.annotations` | Machine / InfraMachine / KubeadmConfig | 否（原地传播） |
+| `.spec.nodeDrainTimeout` / `.spec.nodeDeletionTimeout` | Machine | 否（原地传播） |
+| `.spec.nodeVolumeDetachTimeout` | Machine | 否（原地传播） |
+| 其他字段（如实例类型、磁盘大小） | MachineTemplate | 是（触发整批替换） |
+
+## ⚠️ 注意事项
+- **不建议在控制平面节点运行业务工作负载**，因为 `KubeadmControlPlane` 并不了解这些工作负载的特殊需求（如 quorum 保持、优雅关机）。  [The Cluster API Book](https://cluster-api.sigs.k8s.io/tasks/control-plane/kubeadm-control-plane)  
+- **仅支持 CoreDNS** 作为集群 DNS 服务。  [Github](https://github.com/kubernetes-sigs/cluster-api/blob/main/docs/book/src/tasks/control-plane/kubeadm-control-plane.md)  
+- **升级策略**：修改 `machineTemplate` 的关键字段（如 VM 规格）会触发滚动替换，需提前规划兼容性与回滚方案。
+
+## ✅ 总结
+`machineTemplate` 在 `KubeadmControlPlane` 中的作用是 **统一控制平面节点的机器定义**，并通过 **原地传播机制** 支持部分字段的安全修改。它是控制平面升级、扩缩容和一致性保障的核心组件。
+
 # `kubeadm-config` ConfigMap
 是 kubeadm 在集群中存储配置的核心对象，也是 KCP 与 kubeadm 交互的关键桥梁。
 
