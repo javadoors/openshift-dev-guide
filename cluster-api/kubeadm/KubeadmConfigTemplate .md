@@ -545,14 +545,187 @@ baremetal-operator/pkg/provisioner/ironic/userdata.go
 - 如何传给 Ironic
 - 如何最终传给 cloud-init
 
-## 一句话总结
-Metal3 的 GitHub 仓库是：
+# KubeadmConfigTemplate 中 preKubeadmCommands 与 postKubeadmCommands 详解
 
-👉 **cluster-api-provider-metal3**
+## 一、功能定义
 
-如果你要自研 baremetal provider，Metal3 是最好的参考实现，尤其是：
+| 字段 | 执行时机 | 说明 |
+|------|----------|------|
+| **preKubeadmCommands** | `kubeadm init/join` **执行前** | 用于环境准备、依赖安装、系统参数调优等 |
+| **postKubeadmCommands** | `kubeadm init/join` **执行后** | 用于安装 CNI、配置监控代理、执行自定义脚本等 |
 
-- BareMetalMachine controller  
-- BareMetalHost controller  
-- user-data 注入链路  
-- Ironic provisioning 流程  
+## 二、典型使用场景
+
+### 2.1 preKubeadmCommands 场景
+
+| 场景 | 示例命令 |
+|------|----------|
+| **禁用 Swap** | `swapoff -a && sed -i '/swap/d' /etc/fstab` |
+| **加载内核模块** | `modprobe br_netfilter && modprobe overlay` |
+| **配置内核参数** | `sysctl -w net.bridge.bridge-nf-call-iptables=1` |
+| **安装容器运行时** | `apt-get install -y containerd.io && systemctl enable containerd` |
+| **配置 NTP** | `systemctl enable --now chronyd` |
+| **配置镜像源** | 替换 `/etc/containerd/config.toml` 中的 registry 地址 |
+| **关闭防火墙/SELinux** | `systemctl disable firewalld && setenforce 0` |
+
+### 2.2 postKubeadmCommands 场景
+
+| 场景 | 示例命令 |
+|------|----------|
+| **安装 CNI 插件** | `kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml` |
+| **配置节点标签** | `kubectl label node $(hostname) role=worker --overwrite` |
+| **部署监控 Agent** | 安装 Prometheus Node Exporter 或 Datadog Agent |
+| **执行合规检查** | 运行 CIS Benchmark 脚本或安全扫描工具 |
+| **清理临时文件** | 删除安装过程中产生的临时脚本或缓存 |
+
+## 三、执行机制 (关键)
+
+CAPI 支持两种 Bootstrap 格式，命令的执行方式不同：
+
+### 3.1 cloud-config 模式 (默认)
+
+当 `spec.format` 为 `cloud-config` 或未设置时，CAPI 使用 **cloud-init** 执行命令。
+
+**生成逻辑**:
+```yaml
+# cloud-init 生成的配置片段
+runcmd:
+  # preKubeadmCommands 在这里
+  - swapoff -a
+  - modprobe br_netfilter
+  - kubeadm init --config /run/kubeadm/kubeadm.yaml
+  # postKubeadmCommands 在这里
+  - kubectl apply -f calico.yaml
+```
+
+**执行路径**:
+```
+cloud-init 启动
+    │
+    ├── cloud-config.service (早期)
+    │
+    └── cloud-final.service (后期)
+            │
+            └── 按顺序执行 runcmd 列表
+                    ├── preKubeadmCommands
+                    ├── kubeadm init/join
+                    └── postKubeadmCommands
+```
+
+### 3.2 Ignition 模式
+
+当 `spec.format: ignition` 时，CAPI 使用 **Ignition** (Flatcar/CoreOS 使用) 执行命令。
+
+**生成逻辑**:
+```bash
+# /etc/kubeadm.sh 脚本内容
+#!/bin/bash
+set -euo pipefail
+
+# preKubeadmCommands
+swapoff -a
+modprobe br_netfilter
+
+# kubeadm 执行
+kubeadm init --config /run/kubeadm/kubeadm.yaml
+
+# postKubeadmCommands
+kubectl apply -f calico.yaml
+```
+
+**执行路径**:
+```
+Ignition 启动阶段
+    │
+    ├── 写入 /etc/kubeadm.sh
+    │
+    └── 创建 systemd unit (kubeadm.service)
+            │
+            └── 执行 /etc/kubeadm.sh
+                    ├── preKubeadmCommands
+                    ├── kubeadm init/join
+                    └── postKubeadmCommands
+```
+
+## 四、核心问题解答
+
+### Q: 当不使用 cloud-init 时，preKubeadmCommands 和 postKubeadmCommands 还会执行吗？
+
+**A: 会执行，但执行载体不同。**
+
+| Bootstrap 格式 | 执行载体 | 是否执行 |
+|----------------|----------|----------|
+| **cloud-config** (cloud-init) | `runcmd` 模块 → `cloud-final.service` | ✅ 执行 |
+| **ignition** (Ignition) | `/etc/kubeadm.sh` → `kubeadm.service` | ✅ 执行 |
+| **自定义 Bootstrap Provider** | 由 Provider 自行实现 | ⚠️ 取决于 Provider 实现 |
+
+**关键结论**:
+1. 只要使用 CAPI 内置的 Kubeadm Bootstrap Provider，**无论使用 cloud-init 还是 Ignition，这两个字段都会执行**。
+2. 执行顺序始终为: `preKubeadmCommands` → `kubeadm init/join` → `postKubeadmCommands`
+3. 如果你开发了**自定义 Bootstrap Provider** 并且不继承 CAPI 的 cloud-init/Ignition 生成逻辑，则需要自行实现命令执行逻辑。
+
+## 五、注意事项
+
+| 事项 | 说明 |
+|------|------|
+| **执行环境** | 命令以 `root` 用户执行，无需 `sudo` |
+| **错误处理** | 默认 `set -e`，任一命令失败会中断后续执行 |
+| **网络依赖** | `postKubeadmCommands` 执行时 kubelet 已启动，但 API Server 可能尚未完全就绪，建议使用重试逻辑 |
+| **幂等性** | 建议命令设计为幂等，因为节点可能因故障重新引导 |
+| **日志查看** | cloud-init 日志通常在 `/var/log/cloud-init.log`，Ignition 日志在 `journalctl -u kubeadm.service` |
+| **敏感信息** | 密码/Token 等应通过 `contentFrom.secret` 引用，不要直接写在命令中 |
+
+## 六、配置示例
+```yaml
+apiVersion: bootstrap.cluster.x-k8s.io/v1beta2
+kind: KubeadmConfigTemplate
+metadata:
+  name: my-config-template
+spec:
+  template:
+    spec:
+      # 使用 cloud-config (默认)
+      format: cloud-config
+      
+      preKubeadmCommands:
+        - |
+          #!/bin/bash
+          set -euo pipefail
+          
+          # 禁用 Swap
+          swapoff -a
+          sed -i '/swap/d' /etc/fstab
+          
+          # 加载内核模块
+          cat > /etc/modules-load.d/k8s.conf <<EOF
+          br_netfilter
+          overlay
+          EOF
+          modprobe br_netfilter
+          modprobe overlay
+          
+          # 配置内核参数
+          cat > /etc/sysctl.d/k8s.conf <<EOF
+          net.bridge.bridge-nf-call-iptables = 1
+          net.ipv4.ip_forward = 1
+          EOF
+          sysctl --system
+          
+          # 启动容器运行时
+          systemctl enable --now containerd
+
+      postKubeadmCommands:
+        - |
+          #!/bin/bash
+          # 等待 API Server 就绪
+          until kubectl get nodes; do
+            sleep 5
+          done
+          
+          # 安装 CNI
+          kubectl apply -f /opt/cni/calico.yaml
+          
+          # 添加节点标签
+          kubectl label node $(hostname) node-role.kubernetes.io/worker="" --overwrite
+```
+
