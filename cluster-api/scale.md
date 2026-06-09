@@ -117,3 +117,113 @@ MachineDeployment → MachineSet → Machine
 > **CAPI 在缩容时会自动选择要删除的节点，依据 deletePolicy + 健康状态 + 注解。  
 你可以通过注解强制指定删除或保护某个节点。**
 
+# KCP Controller在缩容时是只根据Replicas判断吧，在Replicas没有改变，而对Machine标记删除的情况，不会触发缩容的吧
+## 关键结论
+
+**KCP Controller 缩容只根据 `numMachines > desiredReplicas` 判断，不会因删除注解而主动触发缩容。**
+
+### 代码证据
+
+位置：`controller.go:550-576`
+```go
+numMachines := len(controlPlane.Machines)
+desiredReplicas := int(*controlPlane.KCP.Spec.Replicas)
+
+switch {
+case numMachines < desiredReplicas && numMachines == 0:
+    return r.initializeControlPlane(ctx, controlPlane)  // 初始化
+case numMachines < desiredReplicas && numMachines > 0:
+    return r.scaleUpControlPlane(ctx, controlPlane)     // 扩容
+case numMachines > desiredReplicas:
+    return r.scaleDownControlPlane(ctx, controlPlane, machineToDelete)  // 缩容
+}
+```
+**只有 `numMachines > desiredReplicas` 时才会触发缩容。**
+
+### 删除注解的真实作用
+
+`DeleteMachineAnnotation` 注解有两个作用：
+
+#### 1. **在缩容时优先被选中**（当缩容已经触发时）
+
+位置：`scale.go:403-407`
+```go
+case controlPlane.MachineWithDeleteAnnotation(outdatedMachines).Len() > 0:
+    eligibleMachines = controlPlane.MachineWithDeleteAnnotation(outdatedMachines)
+case controlPlane.MachineWithDeleteAnnotation(controlPlane.Machines).Len() > 0:
+    eligibleMachines = controlPlane.MachineWithDeleteAnnotation(controlPlane.Machines)
+```
+这意味着：**当缩容已经触发时**，有注解的节点会被优先删除。
+
+#### 2. **不参与 in-place update**
+
+位置：`filters.go:69-71`
+```go
+if _, ok := machine.Annotations[clusterv1.DeleteMachineAnnotation]; ok {
+    res.EligibleForInPlaceUpdate = false
+}
+```
+
+### 具体场景示例
+
+#### **场景 1：Replicas 不变，标记删除注解**
+```yaml
+# KCP 配置
+spec:
+  replicas: 3  # 保持不变
+
+# 当前状态
+Machines:
+- control-plane-abc12 (有 delete-machine 注解)
+- control-plane-def34
+- control-plane-ghi56
+```
+**结果：**
+- `numMachines (3) == desiredReplicas (3)`
+- **不会触发缩容**
+- 有注解的节点不会被 KCP 删除
+- 该节点不会参与 in-place update
+
+#### **场景 2：缩容 + 标记删除注解**
+
+```yaml
+# KCP 配置
+spec:
+  replicas: 3 → 2  # 缩容触发
+
+# 当前状态
+Machines:
+- control-plane-abc12 (有 delete-machine 注解)
+- control-plane-def34
+- control-plane-ghi56
+```
+**结果：**
+- `numMachines (3) > desiredReplicas (2)`
+- **触发缩容**
+- 有注解的 `control-plane-abc12` 会被**优先选中删除**
+
+#### **场景 3：用户手动删除 Machine**
+
+```yaml
+# 用户直接删除 Machine 资源
+kubectl delete machine control-plane-abc12
+
+# 之后状态
+Machines:
+- control-plane-def34
+- control-plane-ghi56
+```
+**结果：**
+- `numMachines (2) < desiredReplicas (3)`
+- **触发扩容**，KCP 会创建新的 Machine 补充到 3 个
+
+### 总结
+
+| 操作 | Replicas 变化 | KCP 行为 |
+|------|--------------|----------|
+| 仅标记删除注解 | 不变 | **无操作**，不会缩容 |
+| 减少 Replicas | 减少 | 缩容，有注解的节点优先删除 |
+| 手动删除 Machine | 不变 | **扩容**，补充到目标副本数 |
+
+**如果您想通过注解删除特定节点，需要同时减少 Replicas 值。**
+
