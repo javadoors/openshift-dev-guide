@@ -227,3 +227,125 @@ Machines:
 
 **如果您想通过注解删除特定节点，需要同时减少 Replicas 值。**
 
+# `cluster.x-k8s.io/delete-machine` 和 `cluster.x-k8s.io/deletion-priority`
+**`delete-machine` 是“强制删除”，  
+`deletion-priority` 是“删除排序 hint”。**
+
+两者都影响 **CAPI 在缩容或替换节点时删除哪个 Machine**，但强度完全不同。
+
+## 1. **cluster.x-k8s.io/delete-machine**  
+### ✔ 语义：**强制删除该 Machine（最高优先级）**
+
+```yaml
+metadata:
+  annotations:
+    cluster.x-k8s.io/delete-machine: "true"
+```
+
+效果：
+- CAPI 会在下一次 reconcile 时 **立即删除该 Machine**  
+- 无论 replicas 是否变化  
+- 无论 deletePolicy 是什么  
+- 无论 deletion-priority 是多少  
+
+这是一个 **强制删除指令**，用于：
+- 手动替换节点  
+- 强制删除不健康节点  
+- 强制删除卡住的 Machine  
+- 自研 provider 中的节点生命周期控制  
+
+### ✔ 删除后会发生什么？
+
+- 如果 replicas 没变 → **KCP/MD 会创建一个新的 Machine（替换）**  
+- 如果 replicas 变小 → **这是缩容**  
+
+## 2. **cluster.x-k8s.io/deletion-priority**  
+### ✔ 语义：**删除排序 hint（数值越小越优先删除）**
+
+```yaml
+metadata:
+  annotations:
+    cluster.x-k8s.io/deletion-priority: "5"
+```
+- 不是强制删除  
+- 只影响排序  
+- 数值越小越优先  
+- 可以是负数（负数优先级最高）  
+
+用于：
+- 控制缩容时删除哪个节点  
+- 控制替换时优先删除哪个节点  
+- 多 AZ / 多机房的删除策略  
+- 自研 provider 的节点生命周期管理  
+
+## 3. **两者的优先级（非常关键）**
+
+CAPI 删除 Machine 的排序规则如下：
+1. **delete-machine=true**（最高优先级）  
+2. NotReady / unhealthy 的 Machine  
+3. **deletion-priority 数值最小**  
+4. deletePolicy（Oldest/Newest/Random）
+
+也就是说：
+
+> **delete-machine 永远优先于 deletion-priority。**
+
+## 4. **两者的行为差异**
+
+| 注解 | 强制删除 | 影响排序 | 是否触发替换 | 是否触发缩容 |
+|------|-----------|-----------|----------------|----------------|
+| **delete-machine** | ✔ 是 | ✘ 否 | ✔ 是（如果 replicas 不变） | ✔ 是（如果 replicas 变小） |
+| **deletion-priority** | ✘ 否 | ✔ 是 | ✘ 否 | ✔ 是（仅在缩容时） |
+
+## 5. **KCP（控制平面）中的行为**
+
+KCP 删除 Machine 的顺序：
+1. delete-machine  
+2. unhealthy  
+3. deletion-priority  
+4. newest（默认）  
+
+所以：
+- 你标记 delete-machine → KCP 会删除并补一个新的控制平面节点  
+- 你设置 deletion-priority → KCP 会在缩容或替换时优先删除该节点  
+
+## 6. **MachineDeployment / MachineSet 中的行为**
+
+删除顺序：
+1. delete-machine  
+2. unhealthy  
+3. deletion-priority  
+4. deletePolicy（Oldest 默认）  
+
+适用于：
+- worker 节点缩容  
+- 滚动升级时的旧节点删除  
+- 多 AZ worker 节点管理  
+
+## 7. **典型使用场景**
+
+### ✔ 强制替换某个节点  
+```yaml
+cluster.x-k8s.io/delete-machine: "true"
+```
+
+### ✔ 缩容时优先删除某些节点  
+```yaml
+cluster.x-k8s.io/deletion-priority: "1"
+```
+
+### ✔ 多机房 / 多 AZ 删除策略  
+- 先删非核心机房  
+- 先删成本高的机房  
+
+### ✔ 自研 Baremetal Provider 的节点生命周期控制  
+- 旧硬件优先删除  
+- 故障率高的节点优先删除  
+
+## 8. 一句话总结（再次强调）
+
+> **delete-machine = 强制删除（立即执行）  
+> deletion-priority = 删除排序 hint（数值越小越优先）**
+
+两者一起构成 CAPI 的 **节点删除决策系统**。
+
