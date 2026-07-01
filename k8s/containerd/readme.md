@@ -163,3 +163,39 @@ server = "https://registry-1.docker.io"
 - 修改 `config.toml` 后需重启 containerd；`hosts.toml` 支持热加载。  
 - 确保 `/var/lib/containerd` 磁盘空间充足，避免镜像缓存撑满。  
 - 使用 **密钥管理系统**（如 Vault）存储认证信息，避免泄露。  
+
+# /etc/crictl.yaml
+
+在生产环境中，除了 `config.toml` 和 `hosts.toml`，**containerd 还会用到 `/etc/crictl.yaml`**，它是 **crictl 工具的配置文件**，主要用于指定 CRI 接口的连接方式。  
+
+## 📂 etc/crictl.yaml 的作用
+- **定义运行时 socket**：告诉 `crictl` 如何连接到 containerd 的 CRI 插件。  
+- **简化命令行**：避免每次执行 `crictl` 都要手动指定 `--runtime-endpoint`。  
+- **支持多运行时**：可切换不同的 CRI 实现（如 containerd、CRI-O）。  
+
+## 🔑 常见配置示例
+
+```yaml
+runtime-endpoint: unix:///run/containerd/containerd.sock
+image-endpoint: unix:///run/containerd/containerd.sock
+timeout: 10
+debug: false
+```
+
+### 字段说明
+- **runtime-endpoint**：指定 CRI socket 地址，containerd 默认是 `/run/containerd/containerd.sock`。  
+- **image-endpoint**：镜像管理接口，通常与 runtime 相同。  
+- **timeout**：命令超时时间，默认 10 秒。  
+- **debug**：是否启用调试日志。  
+
+## 📊 使用场景
+| **场景** | **配置方式** | **效果** |
+|---|---|---|
+| **单一运行时（containerd）** | 指定 `/run/containerd/containerd.sock` | 简化命令行操作 |
+| **多运行时环境** | 修改 `runtime-endpoint` 指向不同 socket | 快速切换运行时 |
+| **调试模式** | `debug: true` | 输出详细日志，便于排查问题 |
+
+## ⚠️ 注意事项
+- `etc/crictl.yaml` 仅影响 **crictl 工具**，不会改变 containerd 本身的行为。  
+- 如果 socket 路径错误，`crictl` 会报错无法连接。  
+- 在 Kubernetes 环境中，通常只需配置一次，后续所有 `crictl` 命令都会自动生效。  
