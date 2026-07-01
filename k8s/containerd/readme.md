@@ -1,3 +1,50 @@
+# /etc/containerd/certs.d/{registry}/hosts.toml
+
+在 **containerd** 中，`/etc/containerd/certs.d/{registry}/hosts.toml` 是 **镜像仓库的专用配置文件**，用于定义某个 registry 的访问方式、认证信息、TLS 校验和加速源。它比 `config.toml` 更灵活，可以针对不同仓库单独配置，并且支持热加载，无需重启 containerd。
+
+## 📂 hosts.toml 的作用
+- **镜像源配置**：指定仓库的 endpoint，支持多个地址实现容错与负载均衡。  
+- **认证与安全**：配置用户名/密码、TLS 证书，保证镜像拉取安全。  
+- **加速与优化**：为公共仓库配置国内加速源，提升拉取速度。  
+- **能力声明**：定义该仓库支持的操作（pull、push、resolve）。  
+
+## 🔑 示例配置
+
+路径：`/etc/containerd/certs.d/docker.io/hosts.toml`
+
+```toml
+server = "https://registry-1.docker.io"
+
+[host."https://<your-id>.mirror.aliyuncs.com"]
+  capabilities = ["pull", "resolve"]
+  skip_verify = false
+
+[host."https://registry-1.docker.io"]
+  capabilities = ["pull", "resolve", "push"]
+  skip_verify = false
+```
+
+### 字段说明
+- **server**：默认仓库地址。  
+- **[host."URL"]**：定义一个 endpoint，可以是加速源或私有仓库。  
+- **capabilities**：支持的操作类型（`pull` 拉取、`push` 推送、`resolve` 解析）。  
+- **skip_verify**：是否跳过 TLS 校验（生产环境必须为 `false`）。  
+
+## 📊 使用场景
+| **场景** | **配置方式** | **效果** |
+|---|---|---|
+| **公共仓库加速** | 添加国内镜像源 endpoint | 提升拉取速度 |
+| **私有仓库认证** | 配置 TLS 证书与用户名/密码 | 确保安全访问 |
+| **多 endpoint 容错** | 配置多个 host | 一个失败时自动切换 |
+| **企业安全仓库** | 强制 TLS 校验 + 签名验证 | 保证镜像可信 |
+
+## ⚠️ 注意事项
+- 修改 `hosts.toml` **无需重启 containerd**，支持热加载。  
+- 避免使用 `skip_verify=true`，否则可能导致中间人攻击风险。  
+- 建议为每个 registry 单独建立目录，例如：  
+  - `/etc/containerd/certs.d/docker.io/hosts.toml`  
+  - `/etc/containerd/certs.d/harbor.local/hosts.toml`  
+
 # containerd的配置文件
 
 **在 containerd 中，主要的配置文件是 `/etc/containerd/config.toml`，它决定了守护进程的运行方式、插件加载、镜像仓库设置、日志与监控等。除此之外，还有 `hosts.toml`（用于 registry 配置）、systemd 服务文件以及证书目录等辅助配置文件。**  
