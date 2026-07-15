@@ -68,7 +68,7 @@ flowchart TD
     A[应用层: Pod/Service] --> B[Calico 数据平面]
     B --> C{封装方式}
     C -->|IPIP| D[跨节点流量封装为 IP-in-IP]
-    C -->|VXLAN| E[跨节点流量封装为 VXLAN (UDP)]
+    C -->|VXLAN| E[跨节点流量封装为 VXLAN - UDP]
     C -->|Direct Routing| F[跨节点流量直接路由转发]
 
     B --> G[Calico 控制平面]
