@@ -29,3 +29,60 @@ Calico 初始化时确实会导致 **宿主机网络栈刷新**，而这会间�
 - Calico 初始化会修改宿主机网络（iptables、路由、设备、CNI 配置）。  
 - 这些修改过程可能导致 **宿主机网络短暂中断**。  
 - kubelet 与 API Server 的心跳依赖宿主机网络，因此会出现 **心跳中断 → 节点 NotReady → 恢复** 的现象。  
+
+# VXLAN/IPIP与BGP
+
+不是同级别的。**VXLAN/IPIP** 和 **BGP** 在 Calico 网络架构里扮演的角色不同：  
+
+## 📖 层级关系
+- **VXLAN/IPIP**  
+  - 属于 **隧道封装方式**，决定跨节点 Pod 流量如何传输。  
+  - IPIP → 用 IP-in-IP 封装。  
+  - VXLAN → 用 UDP 封装。  
+  - 它们解决的是 **跨节点通信的传输方式**。  
+
+- **BGP**  
+  - 属于 **路由分发机制**，负责节点之间如何交换路由信息。  
+  - 节点通过 BGP 广播自己负责的 Pod 网段，其他节点才能知道如何转发流量。  
+  - 它解决的是 **路由发现与分发问题**。  
+
+## ⚡ 关系说明
+- **VXLAN/IPIP** → 决定是否需要隧道。  
+- **BGP** → 决定路由如何传播。  
+- 如果 **VXLAN/IPIP 启用** → 跨节点流量走隧道，BGP 仍然可以启用，但路由分发的作用相对弱化。  
+- 如果 **VXLAN/IPIP 禁用** → 必须依赖 BGP Direct Routing，否则跨节点 Pod 无法互通。  
+
+## 🎯 总结
+- **VXLAN/IPIP** 是 **数据平面传输方式**。  
+- **BGP** 是 **控制平面路由分发机制**。  
+- 它们不是同级别，而是 **互补关系**：  
+  - VXLAN/IPIP 解决“怎么传”。  
+  - BGP 解决“往哪传”。  
+
+## 📖 Calico 网络架构分层
+
+直观展示 **控制平面（BGP）** 与 **数据平面（VXLAN/IPIP/Direct Routing）** 的关系。
+
+```mermaid
+flowchart TD
+    A[应用层: Pod/Service] --> B[Calico 数据平面]
+    B --> C{封装方式}
+    C -->|IPIP| D[跨节点流量封装为 IP-in-IP]
+    C -->|VXLAN| E[跨节点流量封装为 VXLAN (UDP)]
+    C -->|Direct Routing| F[跨节点流量直接路由转发]
+
+    B --> G[Calico 控制平面]
+    G --> H[BGP 路由分发]
+    H --> I[节点间交换 Pod 网段路由]
+    I --> F
+```
+
+⚡ 分层说明
+- **数据平面**（VXLAN/IPIP/Direct Routing）  
+  - 决定跨节点 Pod 流量的传输方式。  
+  - IPIP/VXLAN → 使用隧道封装。  
+  - Direct Routing → 不封装，依赖底层网络直接路由。  
+
+- **控制平面**（BGP）  
+  - 负责节点间路由信息的分发。  
+  - 即使使用隧道，BGP 仍可启用；如果禁用隧道，则必须依赖 BGP。  
