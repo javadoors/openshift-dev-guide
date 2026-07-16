@@ -83,6 +83,23 @@ flowchart TD
   - IPIP/VXLAN → 使用隧道封装。  
   - Direct Routing → 不封装，依赖底层网络直接路由。  
 
+# Calico 控制器启用建议表
+
+## 📖 Calico 控制器启用建议表
+
+| 控制器 | 作用 | 建议启用场景 | 可禁用场景 |
+|--------|------|--------------|------------|
+| **node 控制器** | 管理节点资源、路由同步，保证 Pod 网络互通 | **必须启用**，所有场景 | 无 |
+| **policy 控制器** | 同步 Kubernetes NetworkPolicy 到 Calico 策略模型 | 需要基于 NetworkPolicy 的安全隔离 | 不使用网络策略，仅做基本互通 |
+| **namespace 控制器** | 同步 Namespace 标签到 Calico，用于策略匹配 | 策略依赖 Namespace 标签时 | 不使用基于 Namespace 的策略 |
+| **serviceaccount 控制器** | 同步 ServiceAccount 身份到 Calico，用于策略匹配 | 策略依赖 ServiceAccount 身份时 | 不使用基于 ServiceAccount 的策略 |
+| **endpoint 控制器** | 同步 Pod Endpoint 信息到 Calico WorkloadEndpoint | 需要精确的 Pod Endpoint 策略绑定 | 仅依赖节点路由，不做细粒度策略 |
+
+## ⚡ 总结
+- **必须启用**：`node 控制器`（核心路由和节点管理）。  
+- **策略相关控制器**（policy、namespace、serviceaccount、endpoint） → 只有在需要 **细粒度安全策略** 时才启用。  
+- 如果你的集群只关注 **网络互通** 而不使用复杂策略，可以禁用这些辅助控制器，降低资源消耗。  
+
 - **控制平面**（BGP）  
   - 负责节点间路由信息的分发。  
   - 即使使用隧道，BGP 仍可启用；如果禁用隧道，则必须依赖 BGP。  
