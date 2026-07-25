@@ -115,3 +115,87 @@ sequenceDiagram
 - **最终删除**：当 Finalizer 列表为空时，API Server 才真正删除对象。  
 
 👉 总结：**Finalizer 是一种约定机制**，API Server 不会直接“找到”控制器，而是由控制器监听 CR 并匹配 Finalizer 名称，主动执行清理逻辑并移除 Finalizer，最终由 API Server 完成删除。  
+
+# Finalizer
+
+在 Kubernetes / OpenShift 中，**Finalizer** 是一种保护机制，可以防止资源在删除时被立即清理，从而让控制器有机会执行必要的清理逻辑。你提到的“添加 Finalizer 保护集群不被误删”，通常是指在关键资源（例如 `Cluster`、`Namespace`、`CustomResource`）上加上 Finalizer，确保删除操作必须经过控制器的处理，避免误删导致集群不可恢复。  
+
+## 📖 Finalizer 的作用
+
+- **阻止直接删除**：当资源带有 Finalizer 时，用户执行 `kubectl delete` 并不会立即删除，而是进入 “Terminating” 状态。  
+- **执行清理逻辑**：控制器必须移除 Finalizer 才能真正删除资源，这期间可以执行备份、资源回收、日志记录等操作。  
+- **防止误操作**：避免管理员或自动化脚本一键删除关键资源，提供额外的保护层。  
+
+## 🛠️ 添加 Finalizer 示例
+
+假设你要保护一个自定义资源 `Cluster`，可以在 YAML 中添加 Finalizer：
+
+```yaml
+apiVersion: cluster.example.com/v1
+kind: Cluster
+metadata:
+  name: demo-cluster
+  finalizers:
+    - protect.cluster.finalizer
+```
+
+这样，当有人执行：
+```bash
+kubectl delete cluster demo-cluster
+```
+资源不会立即消失，而是进入 **Terminating** 状态，直到控制器移除 `protect.cluster.finalizer`。  
+
+## 📊 使用场景
+
+| **场景** | **Finalizer作用** |
+|----------|-------------------|
+| 删除集群 | 确保先清理节点、存储、网络，再允许删除 |
+| 删除命名空间 | 确保所有子资源（Pod、Service、PVC）安全清理 |
+| 删除 CRD | 确保相关 Operator 执行回收逻辑 |
+| 删除关键资源 | 防止误删，要求额外确认或自动备份 |
+
+## ✅ 总结
+在 OpenShift 中，**Finalizer 是保护集群和关键资源的有效机制**。通过在资源上添加 Finalizer，可以避免误删，确保删除前执行必要的清理或确认步骤。  
+
+# Finalizer 最佳实践清单
+
+在 Kubernetes / OpenShift 集群中合理使用 Finalizer 来保护关键资源，避免误删或清理不完整：  
+
+## 📖 Finalizer 最佳实践清单
+
+- **命名规范**  
+  - 使用清晰的命名空间前缀，例如：`protect.cluster.finalizer` 或 `cleanup.namespace.finalizer`。  
+  - 避免过于通用的名字，确保能明确区分不同控制器的职责。  
+
+- **关键资源保护**  
+  - 在 `Cluster`、`Namespace`、`CRD` 等关键资源上添加 Finalizer，防止误删导致不可恢复的后果。  
+  - 删除时必须由控制器移除 Finalizer，确保执行清理逻辑。  
+
+- **清理逻辑完整性**  
+  - 在删除前执行必要的操作：释放存储卷、回收网络资源、注销外部服务。  
+  - 确保 Finalizer 的清理逻辑幂等（可重复执行而不会出错）。  
+
+- **避免资源卡死**  
+  - 控制器必须在清理完成后移除 Finalizer，否则资源会一直停留在 `Terminating` 状态。  
+  - 建议在控制器中加入超时机制，防止无限阻塞。  
+
+- **审计与安全**  
+  - 在 Finalizer 清理逻辑中记录审计日志，便于追踪删除操作。  
+  - 对关键资源的 Finalizer 删除操作进行 RBAC 限制，避免普通用户绕过保护。  
+
+- **测试与演练**  
+  - 在测试环境中演练 Finalizer 的删除流程，确保逻辑正确。  
+  - 定期检查集群中是否存在“卡死”的资源，避免遗留问题。  
+
+## 📊 使用场景示例
+
+| **场景** | **Finalizer作用** |
+|----------|-------------------|
+| 删除集群 | 确保先清理节点、存储、网络，再允许删除 |
+| 删除命名空间 | 确保所有子资源安全清理，避免孤儿资源 |
+| 删除 CRD | 确保 Operator 执行回收逻辑 |
+| 删除 PVC | 确保存储卷在外部存储系统中正确释放 |
+
+## ✅ 总结
+Finalizer 是一种 **防误删保护机制**，最佳实践包括：规范命名、保护关键资源、保证清理逻辑完整、避免卡死、加强审计与安全，并在测试环境中演练。这样可以确保集群在删除操作时安全、可控。  
+
